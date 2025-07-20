@@ -75,7 +75,7 @@ func (v *EpisodeListView) Draw(s tcell.Screen) {
 	v.screenHeight = h
 
 	// Calculate space allocation: reserve bottom area for description
-	descriptionHeight := 10 // Reserve 10 lines for description (including borders)
+	descriptionHeight := 15 // Reserve 15 lines for description (including borders)
 	episodeListHeight := h - descriptionHeight
 	if episodeListHeight < 5 { // Minimum space for episode list
 		episodeListHeight = h - 2
@@ -221,8 +221,8 @@ func (v *EpisodeListView) ensureVisible() {
 		return
 	}
 
-	// Account for description window (10 lines) and headers
-	descriptionHeight := 10
+	// Account for description window (15 lines) and headers
+	descriptionHeight := 15
 	episodeListHeight := v.screenHeight - descriptionHeight
 	if episodeListHeight < 5 { // Minimum space for episode list
 		episodeListHeight = v.screenHeight - 2
@@ -260,7 +260,7 @@ func (v *EpisodeListView) HandlePageDown() bool {
 	}
 
 	// Calculate visible height accounting for description window
-	descriptionHeight := 10
+	descriptionHeight := 15
 	episodeListHeight := v.screenHeight - descriptionHeight
 	if episodeListHeight < 5 {
 		episodeListHeight = v.screenHeight - 2
@@ -299,7 +299,7 @@ func (v *EpisodeListView) HandlePageUp() bool {
 	}
 
 	// Calculate visible height accounting for description window
-	descriptionHeight := 10
+	descriptionHeight := 15
 	episodeListHeight := v.screenHeight - descriptionHeight
 	if episodeListHeight < 5 {
 		episodeListHeight = v.screenHeight - 2

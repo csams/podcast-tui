@@ -55,7 +55,7 @@ func (v *PodcastListView) Draw(s tcell.Screen) {
 	v.screenHeight = h
 
 	// Calculate space allocation: reserve bottom area for description
-	descriptionHeight := 10 // Reserve 10 lines for description (including borders)
+	descriptionHeight := 15 // Reserve 15 lines for description (including borders)
 	podcastListHeight := h - descriptionHeight
 	if podcastListHeight < 5 { // Minimum space for podcast list
 		podcastListHeight = h - 2
@@ -203,8 +203,8 @@ func (v *PodcastListView) ensureVisible() {
 		return
 	}
 
-	// Account for description window (10 lines) and headers
-	descriptionHeight := 10
+	// Account for description window (15 lines) and headers
+	descriptionHeight := 15
 	podcastListHeight := v.screenHeight - descriptionHeight
 	if podcastListHeight < 5 { // Minimum space for podcast list
 		podcastListHeight = v.screenHeight - 2
@@ -242,7 +242,7 @@ func (v *PodcastListView) HandlePageDown() bool {
 	}
 
 	// Account for description window
-	descriptionHeight := 10
+	descriptionHeight := 15
 	podcastListHeight := v.screenHeight - descriptionHeight
 	if podcastListHeight < 5 {
 		podcastListHeight = v.screenHeight - 2
@@ -282,7 +282,7 @@ func (v *PodcastListView) HandlePageUp() bool {
 	}
 
 	// Account for description window
-	descriptionHeight := 10
+	descriptionHeight := 15
 	podcastListHeight := v.screenHeight - descriptionHeight
 	if podcastListHeight < 5 {
 		podcastListHeight = v.screenHeight - 2

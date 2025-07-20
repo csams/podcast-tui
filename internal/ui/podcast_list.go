@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	
+	"github.com/csams/podcast-tui/internal/markdown"
 	"github.com/csams/podcast-tui/internal/models"
 	"github.com/gdamore/tcell/v2"
 )
@@ -343,7 +344,8 @@ func (v *PodcastListView) applyFilter() {
 	
 	var matched []scoredPodcast
 	for _, podcast := range v.podcasts {
-		if matches, score, matchResult, matchField := v.searchState.MatchPodcastWithPositions(podcast.Title, podcast.Description); matches {
+		// Use pre-converted description for searching
+		if matches, score, matchResult, matchField := v.searchState.MatchPodcastWithPositions(podcast.Title, podcast.ConvertedDescription); matches {
 			matched = append(matched, scoredPodcast{
 				podcast:     podcast,
 				score:       score,
@@ -425,11 +427,15 @@ func (v *PodcastListView) drawDescriptionWindow(s tcell.Screen, startY, width, h
 		}
 	}
 	
-	// Get selected podcast description
+	// Get selected podcast and its converted description
 	selectedPodcast := v.GetSelected()
 	description := ""
 	if selectedPodcast != nil {
-		description = selectedPodcast.Description
+		description = selectedPodcast.ConvertedDescription
+		// Fall back to original if not converted yet
+		if description == "" {
+			description = selectedPodcast.Description
+		}
 	}
 
 	// Draw separator line
@@ -444,29 +450,23 @@ func (v *PodcastListView) drawDescriptionWindow(s tcell.Screen, startY, width, h
 
 	// Draw description content with text wrapping
 	if description != "" {
-		// Clean up description: remove excessive whitespace and newlines
-		cleanDesc := v.cleanDescription(description)
-
 		// Check if we have match positions for this podcast's description
 		var highlightPositions []int
 		if selectedPodcast != nil && v.searchState.query != "" {
 			// Check if the match was in the description
 			if matchResult, ok := v.matchResults[selectedPodcast.URL]; ok && matchResult.MatchField == "description" {
-				// Re-match against the cleaned description to get correct positions
-				_, _, descResult, _ := v.searchState.MatchPodcastWithPositions("", cleanDesc)
-				if descResult.Score >= 0 {
-					highlightPositions = descResult.Positions
-				}
+				// Use the stored match positions directly
+				highlightPositions = matchResult.Positions
 			}
 		}
 
 		// Wrap text to fit width with padding
 		contentWidth := width - 2 // Leave 1 char padding on each side
-		wrappedLines := v.wrapTextWithHighlights(cleanDesc, contentWidth, highlightPositions)
+		// Since we're using pre-converted text, we don't have styles
+		// We could re-parse for styles if needed, but for now just display without styles
+		wrappedLines := v.wrapStyledText(description, contentWidth, highlightPositions, nil)
 
 		// Draw description lines (limit to available height)
-		descStyle := tcell.StyleDefault.Foreground(ColorFg)
-		highlightStyle := tcell.StyleDefault.Foreground(ColorHighlight).Bold(true)
 		maxLines := height - 3 // Account for separator, header, and padding
 
 		// Ensure scroll offset doesn't exceed content
@@ -485,7 +485,7 @@ func (v *PodcastListView) drawDescriptionWindow(s tcell.Screen, startY, width, h
 			
 			// Draw content if available
 			if lineIdx < len(wrappedLines) {
-				v.drawLineWithHighlights(s, 1, lineY, contentWidth, descStyle, highlightStyle, wrappedLines[lineIdx])
+				v.drawStyledLine(s, 1, lineY, contentWidth, wrappedLines[lineIdx])
 			}
 		}
 
@@ -503,21 +503,6 @@ func (v *PodcastListView) drawDescriptionWindow(s tcell.Screen, startY, width, h
 	}
 }
 
-// cleanDescription removes excessive whitespace and normalizes the description text
-func (v *PodcastListView) cleanDescription(desc string) string {
-	// Replace multiple whitespace characters with single spaces
-	desc = strings.ReplaceAll(desc, "\t", " ")
-	desc = strings.ReplaceAll(desc, "\r\n", " ")
-	desc = strings.ReplaceAll(desc, "\n", " ")
-	desc = strings.ReplaceAll(desc, "\r", " ")
-	
-	// Replace multiple spaces with single space
-	for strings.Contains(desc, "  ") {
-		desc = strings.ReplaceAll(desc, "  ", " ")
-	}
-	
-	return strings.TrimSpace(desc)
-}
 
 
 // wrapTextWithHighlights wraps text and preserves highlight positions
@@ -653,6 +638,244 @@ func (v *PodcastListView) drawLineWithHighlights(s tcell.Screen, x, y, maxWidth 
 	// Pad the rest of the line
 	for i := screenPos; i < maxWidth; i++ {
 		s.SetContent(x+i, y, ' ', nil, style)
+	}
+}
+
+// styledLineWithHighlights represents a line with both styling and highlight information
+type styledLineWithHighlights struct {
+	text      string
+	positions []int  // Highlight positions
+	styles    []markdown.StyleRange  // Style ranges that apply to this line
+}
+
+// splitPreservingNewlines splits text into lines, preserving empty lines
+func splitPreservingNewlines(text string) []string {
+	// Handle empty string case
+	if text == "" {
+		return []string{""}
+	}
+	
+	// Split by newline but preserve the structure
+	lines := strings.Split(text, "\n")
+	return lines
+}
+
+// wrapStyledText wraps styled text while preserving both styles and highlight positions
+func (v *PodcastListView) wrapStyledText(text string, width int, highlightPositions []int, styles []markdown.StyleRange) []styledLineWithHighlights {
+	if width <= 0 {
+		return []styledLineWithHighlights{}
+	}
+
+	// Create highlight map
+	highlightMap := make(map[int]bool)
+	for _, pos := range highlightPositions {
+		highlightMap[pos] = true
+	}
+
+	// Split text by newlines first to preserve paragraph breaks
+	paragraphs := splitPreservingNewlines(text)
+	var allLines []styledLineWithHighlights
+	globalRunePos := 0 // Track position across entire text
+	
+	for paragraphIdx, paragraph := range paragraphs {
+		// Handle empty lines (preserve them)
+		if paragraph == "" {
+			allLines = append(allLines, styledLineWithHighlights{
+				text:      "",
+				positions: nil,
+				styles:    nil,
+			})
+			// Account for the newline character if not the last paragraph
+			if paragraphIdx < len(paragraphs)-1 {
+				globalRunePos++
+			}
+			continue
+		}
+		
+		// Process non-empty paragraph
+		paragraphRunes := []rune(paragraph)
+		
+		// Wrap this paragraph
+		paragraphLines := v.wrapParagraphWithStyles(paragraph, width, globalRunePos, highlightMap, styles)
+		allLines = append(allLines, paragraphLines...)
+		
+		// Update global position
+		globalRunePos += len(paragraphRunes)
+		// Account for the newline character if not the last paragraph
+		if paragraphIdx < len(paragraphs)-1 {
+			globalRunePos++
+		}
+	}
+
+	return allLines
+}
+
+// wrapParagraphWithStyles wraps a single paragraph preserving styles and highlights
+func (v *PodcastListView) wrapParagraphWithStyles(paragraph string, width int, paragraphStartPos int, highlightMap map[int]bool, styles []markdown.StyleRange) []styledLineWithHighlights {
+	words := strings.Fields(paragraph)
+	if len(words) == 0 {
+		return []styledLineWithHighlights{}
+	}
+
+	var lines []styledLineWithHighlights
+	var currentLine strings.Builder
+	var currentHighlights []int
+	var currentStyles []markdown.StyleRange
+
+	// Find word positions in the paragraph (as rune positions)
+	wordPositions := make([]int, len(words))
+	runePos := 0
+	paragraphRunes := []rune(paragraph)
+	
+	for i, word := range words {
+		// Find the word starting from current position
+		wordRunes := []rune(word)
+		found := false
+		
+		for j := runePos; j <= len(paragraphRunes)-len(wordRunes); j++ {
+			if string(paragraphRunes[j:j+len(wordRunes)]) == word {
+				wordPositions[i] = j
+				runePos = j + len(wordRunes)
+				found = true
+				break
+			}
+		}
+		
+		if !found {
+			wordPositions[i] = runePos
+		}
+	}
+
+	for wordIdx, word := range words {
+		wordStartPosInParagraph := wordPositions[wordIdx]
+		wordStartPosGlobal := paragraphStartPos + wordStartPosInParagraph
+		
+		// Check if adding this word would exceed the width
+		currentLineRuneCount := len([]rune(currentLine.String()))
+		wordRuneCount := len([]rune(word))
+		if currentLineRuneCount > 0 && currentLineRuneCount+1+wordRuneCount > width {
+			// Start a new line
+			lines = append(lines, styledLineWithHighlights{
+				text:      currentLine.String(),
+				positions: currentHighlights,
+				styles:    currentStyles,
+			})
+			currentLine.Reset()
+			currentHighlights = nil
+			currentStyles = nil
+		}
+
+		// Add space before word (if not first word)
+		lineOffset := len([]rune(currentLine.String()))
+		if currentLine.Len() > 0 {
+			currentLine.WriteString(" ")
+			lineOffset++
+		}
+
+		// Add word to current line
+		currentLine.WriteString(word)
+
+		// Map highlight positions for this word
+		wordRunes := []rune(word)
+		for i := 0; i < len(wordRunes); i++ {
+			globalPos := wordStartPosGlobal + i
+			if highlightMap[globalPos] {
+				currentHighlights = append(currentHighlights, lineOffset+i)
+			}
+		}
+
+		// Find styles that apply to this word
+		for _, style := range styles {
+			if style.Start <= wordStartPosGlobal && style.End > wordStartPosGlobal {
+				// This style applies to at least part of this word
+				lineStyle := markdown.StyleRange{
+					Start: lineOffset,
+					End:   lineOffset + wordRuneCount,
+					Type:  style.Type,
+				}
+				
+				// Adjust if style starts or ends within the word
+				if style.Start > wordStartPosGlobal {
+					lineStyle.Start = lineOffset + (style.Start - wordStartPosGlobal)
+				}
+				if style.End < wordStartPosGlobal + wordRuneCount {
+					lineStyle.End = lineOffset + (style.End - wordStartPosGlobal)
+				}
+				
+				currentStyles = append(currentStyles, lineStyle)
+			}
+		}
+
+		// Handle very long words that exceed width
+		if len([]rune(currentLine.String())) > width {
+			lines = append(lines, styledLineWithHighlights{
+				text:      currentLine.String(),
+				positions: currentHighlights,
+				styles:    currentStyles,
+			})
+			currentLine.Reset()
+			currentHighlights = nil
+			currentStyles = nil
+		}
+	}
+
+	// Add the last line if it has content
+	if currentLine.Len() > 0 {
+		lines = append(lines, styledLineWithHighlights{
+			text:      currentLine.String(),
+			positions: currentHighlights,
+			styles:    currentStyles,
+		})
+	}
+
+	return lines
+}
+
+// drawStyledLine draws a line with both styles and highlights
+func (v *PodcastListView) drawStyledLine(s tcell.Screen, x, y, maxWidth int, line styledLineWithHighlights) {
+	// Create highlight map for this line
+	highlightMap := make(map[int]bool)
+	for _, pos := range line.positions {
+		highlightMap[pos] = true
+	}
+
+	// Convert to runes for proper positioning
+	runes := []rune(line.text)
+	
+	// Default styles
+	defaultStyle := tcell.StyleDefault.Foreground(ColorFg)
+	
+	// Draw each character with appropriate style
+	screenPos := 0
+	for runeIdx, r := range runes {
+		if screenPos >= maxWidth {
+			break
+		}
+		
+		// Start with default style
+		charStyle := defaultStyle
+		
+		// Apply any styles that cover this position
+		for _, styleRange := range line.styles {
+			if runeIdx >= styleRange.Start && runeIdx < styleRange.End {
+				charStyle = GetTcellStyle(styleRange.Type)
+				break
+			}
+		}
+		
+		// Apply highlight if needed (highlight takes precedence)
+		if highlightMap[runeIdx] {
+			// Preserve existing formatting but add highlight color
+			charStyle = charStyle.Foreground(ColorHighlight).Bold(true)
+		}
+		
+		s.SetContent(x+screenPos, y, r, nil, charStyle)
+		screenPos++
+	}
+	
+	// Pad the rest of the line
+	for i := screenPos; i < maxWidth; i++ {
+		s.SetContent(x+i, y, ' ', nil, defaultStyle)
 	}
 }
 

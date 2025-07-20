@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/csams/podcast-tui/internal/markdown"
 	"github.com/csams/podcast-tui/internal/models"
 )
 
@@ -72,6 +73,9 @@ func ParseFeed(url string) (*models.Podcast, error) {
 		imageURL = rss.Channel.ITunesImage.Href
 	}
 	
+	// Create markdown converter
+	converter := markdown.NewMarkdownConverter()
+	
 	podcast := &models.Podcast{
 		Title:       rss.Channel.Title,
 		Description: rss.Channel.Description,
@@ -79,6 +83,12 @@ func ParseFeed(url string) (*models.Podcast, error) {
 		ImageURL:    imageURL,
 		LastUpdated: time.Now(),
 		Episodes:    make([]*models.Episode, 0, len(rss.Channel.Items)),
+	}
+	
+	// Convert podcast description
+	if podcast.Description != "" {
+		result := converter.Convert(podcast.Description)
+		podcast.ConvertedDescription = result.Text
 	}
 
 	for _, item := range rss.Channel.Items {
@@ -101,6 +111,12 @@ func ParseFeed(url string) (*models.Podcast, error) {
 
 		// Generate unique ID for the episode
 		episode.GenerateID(url)
+		
+		// Convert episode description
+		if episode.Description != "" {
+			result := converter.Convert(episode.Description)
+			episode.ConvertedDescription = result.Text
+		}
 
 		podcast.Episodes = append(podcast.Episodes, episode)
 	}

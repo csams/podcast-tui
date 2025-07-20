@@ -15,6 +15,9 @@ type Podcast struct {
 	Author      string
 	Episodes    []*Episode
 	LastUpdated time.Time
+	
+	// Converted description (persisted for performance)
+	ConvertedDescription string `json:"convertedDescription,omitempty"`
 }
 
 type Episode struct {
@@ -31,6 +34,9 @@ type Episode struct {
 	DownloadSize int64         `json:"downloadSize,omitempty"`
 	DownloadDate time.Time     `json:"downloadDate,omitempty"`
 	LastPlayed   time.Time     `json:"lastPlayed,omitempty"`
+	
+	// Converted description (persisted for performance)
+	ConvertedDescription string `json:"convertedDescription,omitempty"`
 }
 
 // GenerateEpisodeID creates a unique ID for an episode based on podcast URL, episode URL, and publish date

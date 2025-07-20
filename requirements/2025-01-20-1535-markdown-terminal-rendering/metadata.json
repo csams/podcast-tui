@@ -1,0 +1,22 @@
+{
+  "id": "markdown-terminal-rendering",
+  "started": "2025-01-20T15:35:00Z",
+  "lastUpdated": "2025-01-20T15:35:00Z",
+  "status": "complete",
+  "phase": "complete",
+  "progress": {
+    "discovery": { "answered": 5, "total": 5 },
+    "detail": { "answered": 5, "total": 5 }
+  },
+  "contextFiles": [
+    "internal/ui/podcast_list.go",
+    "internal/ui/episode_list.go", 
+    "internal/ui/search.go",
+    "internal/feed/parser.go"
+  ],
+  "relatedFeatures": [
+    "search highlighting",
+    "text wrapping",
+    "description display"
+  ]
+}

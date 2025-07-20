@@ -36,6 +36,8 @@ type App struct {
 	confirmDialog   *ConfirmationDialog
 	configDir       string
 	shutdownOnce    sync.Once
+	positionTicker  *time.Ticker
+	positionUpdate  chan struct{}
 }
 
 type Mode int
@@ -61,12 +63,13 @@ func NewApp() *App {
 	configDir = filepath.Join(configDir, "podcast-tui")
 
 	app := &App{
-		quit:          make(chan struct{}),
-		mode:          ModeNormal,
-		player:        player.New(),
-		helpDialog:    NewHelpDialog(),
-		confirmDialog: NewConfirmationDialog(),
-		configDir:     configDir,
+		quit:           make(chan struct{}),
+		mode:           ModeNormal,
+		player:         player.New(),
+		helpDialog:     NewHelpDialog(),
+		confirmDialog:  NewConfirmationDialog(),
+		configDir:      configDir,
+		positionUpdate: make(chan struct{}, 1),
 	}
 
 	// Initialize download manager
@@ -171,6 +174,9 @@ func (a *App) shutdown() {
 		// Save current episode position one final time
 		a.saveEpisodePosition()
 		
+		// Stop position ticker
+		a.stopPositionTicker()
+		
 		// Stop the player and ensure mpv process is terminated
 		if a.player != nil {
 			log.Println("Stopping player...")
@@ -190,14 +196,30 @@ func (a *App) shutdown() {
 }
 
 func (a *App) handleEvents() {
+	// Create a channel for screen events
+	eventChan := make(chan tcell.Event)
+	go func() {
+		for {
+			ev := a.screen.PollEvent()
+			if ev == nil {
+				close(eventChan)
+				return
+			}
+			eventChan <- ev
+		}
+	}()
+
 	for {
 		select {
 		case <-a.quit:
 			return
-		default:
-			ev := a.screen.PollEvent()
-			if ev == nil {
-				// Screen might be finalized
+		case <-a.positionUpdate:
+			// Update position display
+			a.updateCurrentPosition()
+			a.draw()
+		case ev, ok := <-eventChan:
+			if !ok {
+				// Channel closed, screen might be finalized
 				return
 			}
 			switch ev := ev.(type) {
@@ -1050,6 +1072,9 @@ func (a *App) stopCurrentEpisode() {
 	// Save position before stopping
 	a.saveEpisodePosition()
 	
+	// Stop position ticker
+	a.stopPositionTicker()
+	
 	// Stop playback but keep mpv idle for instant resume
 	if err := a.player.StopKeepIdle(); err != nil {
 		log.Printf("Error stopping player: %v", err)
@@ -1155,22 +1180,41 @@ func (a *App) playEpisode(episode *models.Episode) {
 	// Resume from saved position if available
 	log.Printf("Episode position check - Position: %v, Title: %s", episode.Position, episode.Title)
 	if episode.Position > 0 && episode.Position < time.Hour*24 {
+		// Store the position to resume from (in case it gets modified)
+		resumePosition := episode.Position
 		go func() {
-			// Give mpv more time to start and be ready for seek operations
-			time.Sleep(2 * time.Second)
+			// Wait for mpv to fully load the file
+			maxWaitTime := 5 * time.Second
+			startTime := time.Now()
+			
+			// Wait until player reports a valid duration (indicates file is loaded)
+			for time.Since(startTime) < maxWaitTime {
+				if duration, err := a.player.GetDuration(); err == nil && duration > 0 {
+					log.Printf("File loaded, duration: %v", duration)
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			
+			// Additional small delay to ensure mpv is ready for seeking
+			time.Sleep(200 * time.Millisecond)
 
 			// Seek to saved position
-			seekSeconds := int(episode.Position.Seconds())
-			log.Printf("Attempting to seek to position: %d seconds (%v)", seekSeconds, episode.Position)
+			seekSeconds := int(resumePosition.Seconds())
+			log.Printf("Attempting to seek to position: %d seconds (%v)", seekSeconds, resumePosition)
 			
 			// Try seeking multiple times if it fails initially
 			var err error
 			for attempts := 0; attempts < 3; attempts++ {
 				err = a.player.Seek(seekSeconds)
 				if err == nil {
-					log.Printf("Successfully resumed from position: %v on attempt %d", episode.Position, attempts+1)
+					log.Printf("Successfully resumed from position: %v on attempt %d", resumePosition, attempts+1)
 					a.statusMessage = fmt.Sprintf("Resumed: %s at %s",
-						episode.Title, a.formatTime(episode.Position))
+						episode.Title, a.formatTime(resumePosition))
+					// Update the episode position to match what we seeked to
+					a.currentEpisode.Position = resumePosition
+					// Start position ticker after successful seek
+					a.startPositionTicker()
 					break
 				}
 				log.Printf("Seek attempt %d failed: %v", attempts+1, err)
@@ -1180,10 +1224,14 @@ func (a *App) playEpisode(episode *models.Episode) {
 			if err != nil {
 				log.Printf("Failed to resume from position after 3 attempts: %v", err)
 				a.statusMessage = "Failed to resume from saved position"
+				// Start position ticker even if seek failed
+				a.startPositionTicker()
 			}
 		}()
 	} else {
 		log.Printf("Not resuming - Position: %v (either 0 or > 24h)", episode.Position)
+		// Start position ticker immediately if no resume needed
+		a.startPositionTicker()
 	}
 }
 
@@ -1261,6 +1309,9 @@ func (a *App) restartEpisode(episode *models.Episode) {
 	if err := a.subscriptions.Save(); err != nil {
 		log.Printf("Failed to save position reset: %v", err)
 	}
+	
+	// Start position ticker for restart
+	a.startPositionTicker()
 }
 
 // handleDownloadProgress handles download progress updates
@@ -1533,6 +1584,7 @@ func (a *App) mergePodcastData(existing *models.Podcast, updated *models.Podcast
 	// Update podcast metadata
 	existing.Title = updated.Title
 	existing.Description = updated.Description
+	existing.ConvertedDescription = updated.ConvertedDescription
 	existing.ImageURL = updated.ImageURL
 	existing.Author = updated.Author
 	existing.LastUpdated = updated.LastUpdated
@@ -1572,11 +1624,12 @@ func (a *App) mergePodcastData(existing *models.Podcast, updated *models.Podcast
 			existingEp.ID = newEpisode.ID // Update ID if it was empty
 			existingEp.Title = newEpisode.Title
 			existingEp.Description = newEpisode.Description
+			existingEp.ConvertedDescription = newEpisode.ConvertedDescription
 			existingEp.URL = newEpisode.URL
 			existingEp.PublishDate = newEpisode.PublishDate
 			
-			// Update duration if the new episode has duration data and existing doesn't
-			if newEpisode.Duration > 0 && existingEp.Duration == 0 {
+			// Update duration if the new episode has duration data
+			if newEpisode.Duration > 0 {
 				existingEp.Duration = newEpisode.Duration
 			}
 			
@@ -1590,4 +1643,44 @@ func (a *App) mergePodcastData(existing *models.Podcast, updated *models.Podcast
 
 	// Replace episodes with merged list
 	existing.Episodes = mergedEpisodes
+}
+
+// startPositionTicker starts a ticker that updates the UI periodically when playing
+func (a *App) startPositionTicker() {
+	// Stop any existing ticker
+	a.stopPositionTicker()
+	
+	// Create new ticker for position updates (every 500ms)
+	a.positionTicker = time.NewTicker(500 * time.Millisecond)
+	
+	go func() {
+		for range a.positionTicker.C {
+			// Only update if playing
+			if a.player.GetState() == player.StatePlaying {
+				// Send non-blocking update signal
+				select {
+				case a.positionUpdate <- struct{}{}:
+				default:
+					// Channel full, skip this update
+				}
+			}
+		}
+	}()
+}
+
+// stopPositionTicker stops the position update ticker
+func (a *App) stopPositionTicker() {
+	if a.positionTicker != nil {
+		a.positionTicker.Stop()
+		a.positionTicker = nil
+	}
+}
+
+// updateCurrentPosition updates the current episode's position from the player
+func (a *App) updateCurrentPosition() {
+	if a.currentEpisode != nil && a.player.GetState() != player.StateStopped {
+		if position, err := a.player.GetPosition(); err == nil {
+			a.currentEpisode.Position = position
+		}
+	}
 }

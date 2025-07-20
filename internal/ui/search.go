@@ -302,16 +302,16 @@ func (s *SearchState) MatchPodcast(title, url, latestEpisode string) (bool, int)
 }
 
 // MatchEpisodeWithPositions checks if an episode matches and returns positions for highlighting
-func (s *SearchState) MatchEpisodeWithPositions(title, description string) (bool, int, MatchResult) {
+func (s *SearchState) MatchEpisodeWithPositions(title, description string) (bool, int, MatchResult, string) {
 	if s.query == "" {
-		return true, 0, MatchResult{Score: 0, Positions: nil}
+		return true, 0, MatchResult{Score: 0, Positions: nil}, ""
 	}
 	
 	// Try matching title first
 	titleResult := s.matchWithPositions(title)
 	if titleResult.Score >= 0 {
 		if s.minScore == 0 || titleResult.Score >= s.minScore {
-			return true, titleResult.Score, titleResult
+			return true, titleResult.Score, titleResult, "title"
 		}
 	}
 	
@@ -320,11 +320,11 @@ func (s *SearchState) MatchEpisodeWithPositions(title, description string) (bool
 	if descResult.Score >= 0 {
 		// Check if description match meets minimum score threshold
 		if s.minScore == 0 || descResult.Score >= s.minScore {
-			return true, descResult.Score, descResult
+			return true, descResult.Score, descResult, "description"
 		}
 	}
 	
-	return false, -1, MatchResult{Score: -1, Positions: nil}
+	return false, -1, MatchResult{Score: -1, Positions: nil}, ""
 }
 
 // MatchPodcastWithPositions checks if a podcast matches and returns positions for highlighting

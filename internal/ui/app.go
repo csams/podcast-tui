@@ -85,17 +85,30 @@ func (a *App) Run() error {
 	if err := s.Init(); err != nil {
 		return err
 	}
-	defer s.Fini()
 	
-	// Ensure cleanup happens even on panic
+	// Ensure cleanup happens in the correct order
 	defer func() {
+		// First stop the event loop by closing quit channel if not already closed
+		select {
+		case <-a.quit:
+			// Already closed
+		default:
+			close(a.quit)
+		}
+		
+		// Perform shutdown
+		a.shutdown()
+		
+		// Finally clean up the screen
+		s.Fini()
+		
+		// Handle any panic
 		if r := recover(); r != nil {
 			log.Printf("Panic during shutdown: %v", r)
 		}
-		a.shutdown()
 	}()
 
-	s.SetStyle(tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorWhite))
+	s.SetStyle(tcell.StyleDefault.Background(ColorBg).Foreground(ColorFg))
 	s.Clear()
 
 	// Load subscriptions
@@ -129,7 +142,10 @@ func (a *App) Run() error {
 	go func() {
 		<-sigCh
 		log.Println("Received interrupt signal, shutting down...")
-		a.shutdown()
+		// Post an interrupt event to ensure event loop exits
+		if a.screen != nil {
+			a.screen.PostEvent(tcell.NewEventInterrupt(nil))
+		}
 		close(a.quit)
 	}()
 
@@ -161,6 +177,8 @@ func (a *App) shutdown() {
 			if err := a.player.Stop(); err != nil {
 				log.Printf("Error stopping player: %v", err)
 			}
+			// Ensure complete cleanup
+			a.player.Cleanup()
 		}
 		
 		// Stop download manager
@@ -173,14 +191,26 @@ func (a *App) shutdown() {
 
 func (a *App) handleEvents() {
 	for {
-		ev := a.screen.PollEvent()
-		switch ev := ev.(type) {
-		case *tcell.EventResize:
-			a.screen.Sync()
-			a.draw()
-		case *tcell.EventKey:
-			if a.handleKey(ev) {
+		select {
+		case <-a.quit:
+			return
+		default:
+			ev := a.screen.PollEvent()
+			if ev == nil {
+				// Screen might be finalized
+				return
+			}
+			switch ev := ev.(type) {
+			case *tcell.EventResize:
+				a.screen.Sync()
 				a.draw()
+			case *tcell.EventKey:
+				if a.handleKey(ev) {
+					a.draw()
+				}
+			case *tcell.EventInterrupt:
+				// Exit the event loop
+				return
 			}
 		}
 	}
@@ -202,8 +232,12 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 		case tcell.KeyRune:
 			switch ev.Rune() {
 			case 'q':
-				a.shutdown()
+				// Post an interrupt event to ensure event loop exits
+				if a.screen != nil {
+					a.screen.PostEvent(tcell.NewEventInterrupt(nil))
+				}
 				close(a.quit)
+				a.shutdown()
 				return false
 			case 'j':
 				// Clear status message when navigating
@@ -655,7 +689,15 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 }
 
 func (a *App) draw() {
-	a.screen.Clear()
+	// Try using Fill instead of Clear to force all cells to update
+	w, h := a.screen.Size()
+	style := tcell.StyleDefault.Background(ColorBg).Foreground(ColorFg)
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			a.screen.SetContent(x, y, ' ', nil, style)
+		}
+	}
+	
 	a.currentView.Draw(a.screen)
 	a.drawStatusBar()
 
@@ -756,7 +798,7 @@ func (a *App) formatPlayerStatus(width int) string {
 
 func (a *App) drawStatusBar() {
 	w, h := a.screen.Size()
-	style := tcell.StyleDefault.Background(tcell.ColorNavy).Foreground(tcell.ColorWhite)
+	style := tcell.StyleDefault.Background(ColorBgHighlight).Foreground(ColorFg)
 
 	for x := 0; x < w; x++ {
 		a.screen.SetContent(x, h-1, ' ', nil, style)
@@ -812,7 +854,7 @@ func (a *App) drawStatusBar() {
 
 	// Show status message if any (but leave space for player status)
 	if a.statusMessage != "" {
-		msgStyle := tcell.StyleDefault.Background(tcell.ColorNavy).Foreground(tcell.ColorYellow)
+		msgStyle := tcell.StyleDefault.Background(ColorBgHighlight).Foreground(ColorYellow)
 		maxMsgWidth := w - len(modeStr) - len(playerStatus) - 4
 		if len(a.statusMessage) > maxMsgWidth && maxMsgWidth > 0 {
 			a.statusMessage = a.statusMessage[:maxMsgWidth-3] + "..."
@@ -839,7 +881,7 @@ func drawTextWithHighlight(s tcell.Screen, x, y, maxWidth int, style tcell.Style
 		highlightMap[pos] = true
 	}
 	
-	highlightStyle := style.Foreground(tcell.ColorYellow).Bold(true)
+	highlightStyle := style.Foreground(ColorHighlight).Bold(true)
 	
 	// Convert text to runes for proper Unicode handling
 	runes := []rune(text)
@@ -875,7 +917,10 @@ func (a *App) executeCommand() {
 		}
 		go a.addPodcast(parts[1])
 	case "q", "quit":
-		a.shutdown()
+		// Post an interrupt event to ensure event loop exits
+		if a.screen != nil {
+			a.screen.PostEvent(tcell.NewEventInterrupt(nil))
+		}
 		close(a.quit)
 	}
 }
@@ -1288,10 +1333,12 @@ func (a *App) confirmEpisodeRedownload(episode *models.Episode) {
 				if err := a.deleteDownloadedEpisode(episode); err != nil {
 					a.statusMessage = "Delete error: " + err.Error()
 					log.Printf("Failed to delete episode for re-download: %v", err)
+					a.draw() // Refresh UI to show error
 					return
 				}
 				// Remove from registry so it can be downloaded again
 				a.downloadManager.RemoveFromRegistry(episode.ID)
+				a.draw() // Refresh UI to update download indicators before starting new download
 				// Start new download
 				a.startEpisodeDownload(episode)
 			}()
@@ -1417,9 +1464,11 @@ func (a *App) confirmEpisodeDeletion(episode *models.Episode) {
 					if err := a.downloadManager.CancelDownload(episode.ID); err != nil {
 						a.statusMessage = "Cancel error: " + err.Error()
 						log.Printf("Failed to cancel download: %v", err)
+						a.draw() // Refresh UI to show error
 						return
 					}
 					a.statusMessage = "Download cancelled: " + episode.Title
+					a.draw() // Refresh UI to update download indicators
 				}()
 			},
 			func() {
@@ -1436,9 +1485,11 @@ func (a *App) confirmEpisodeDeletion(episode *models.Episode) {
 					if err := a.deleteDownloadedEpisode(episode); err != nil {
 						a.statusMessage = "Delete error: " + err.Error()
 						log.Printf("Failed to delete episode: %v", err)
+						a.draw() // Refresh UI to show error
 						return
 					}
 					a.statusMessage = "Deleted: " + episode.Title
+					a.draw() // Refresh UI to update download indicators
 				}()
 			},
 			func() {

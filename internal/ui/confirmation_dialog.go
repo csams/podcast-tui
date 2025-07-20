@@ -68,7 +68,7 @@ func (c *ConfirmationDialog) Draw(s tcell.Screen) {
 	}
 
 	// Draw dialog background
-	dialogStyle := tcell.StyleDefault.Background(tcell.ColorDarkRed).Foreground(tcell.ColorWhite)
+	dialogStyle := tcell.StyleDefault.Background(ColorRed1).Foreground(ColorFg)
 	for y := startY; y < startY+dialogHeight; y++ {
 		for x := startX; x < startX+dialogWidth; x++ {
 			s.SetContent(x, y, ' ', nil, dialogStyle)
@@ -76,7 +76,7 @@ func (c *ConfirmationDialog) Draw(s tcell.Screen) {
 	}
 
 	// Draw border
-	borderStyle := tcell.StyleDefault.Background(tcell.ColorDarkRed).Foreground(tcell.ColorWhite)
+	borderStyle := tcell.StyleDefault.Background(ColorRed1).Foreground(ColorBorder)
 
 	// Top and bottom border
 	for x := startX; x < startX+dialogWidth; x++ {
@@ -99,7 +99,7 @@ func (c *ConfirmationDialog) Draw(s tcell.Screen) {
 	}
 
 	// Title
-	titleStyle := tcell.StyleDefault.Background(tcell.ColorDarkRed).Foreground(tcell.ColorYellow).Bold(true)
+	titleStyle := tcell.StyleDefault.Background(ColorRed1).Foreground(ColorYellow).Bold(true)
 	titleX := startX + (dialogWidth-len(c.title))/2
 	if titleX < startX+2 {
 		titleX = startX + 2
@@ -107,7 +107,7 @@ func (c *ConfirmationDialog) Draw(s tcell.Screen) {
 	drawText(s, titleX, startY+1, titleStyle, c.title)
 
 	// Message
-	messageStyle := tcell.StyleDefault.Background(tcell.ColorDarkRed).Foreground(tcell.ColorWhite)
+	messageStyle := tcell.StyleDefault.Background(ColorRed1).Foreground(ColorFg)
 	messageLines := wrapText(c.message, dialogWidth-4)
 	for i, line := range messageLines {
 		if i+3 >= dialogHeight-2 {
@@ -117,7 +117,7 @@ func (c *ConfirmationDialog) Draw(s tcell.Screen) {
 	}
 
 	// Buttons
-	buttonStyle := tcell.StyleDefault.Background(tcell.ColorDarkRed).Foreground(tcell.ColorWhite).Bold(true)
+	buttonStyle := tcell.StyleDefault.Background(ColorRed1).Foreground(ColorFg).Bold(true)
 	buttonsY := startY + dialogHeight - 2
 
 	// "Y" button

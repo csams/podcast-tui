@@ -85,7 +85,7 @@ func (h *HelpDialog) Draw(s tcell.Screen) {
 	}
 
 	// Draw dialog background
-	dialogStyle := tcell.StyleDefault.Background(tcell.ColorDarkBlue).Foreground(tcell.ColorWhite)
+	dialogStyle := tcell.StyleDefault.Background(ColorBgHighlight).Foreground(ColorFg)
 	for y := startY; y < startY+dialogHeight; y++ {
 		for x := startX; x < startX+dialogWidth; x++ {
 			s.SetContent(x, y, ' ', nil, dialogStyle)
@@ -93,7 +93,7 @@ func (h *HelpDialog) Draw(s tcell.Screen) {
 	}
 
 	// Draw border
-	borderStyle := tcell.StyleDefault.Background(tcell.ColorDarkBlue).Foreground(tcell.ColorWhite)
+	borderStyle := tcell.StyleDefault.Background(ColorBgHighlight).Foreground(ColorBorder)
 
 	// Top and bottom border
 	for x := startX; x < startX+dialogWidth; x++ {
@@ -116,7 +116,7 @@ func (h *HelpDialog) Draw(s tcell.Screen) {
 	}
 
 	// Title
-	titleStyle := tcell.StyleDefault.Background(tcell.ColorDarkBlue).Foreground(tcell.ColorYellow).Bold(true)
+	titleStyle := tcell.StyleDefault.Background(ColorBgHighlight).Foreground(ColorHeader).Bold(true)
 	title := "Help - Keybindings"
 	titleX := startX + (dialogWidth-len(title))/2
 	drawText(s, titleX, startY+1, titleStyle, title)
@@ -129,7 +129,7 @@ func (h *HelpDialog) Draw(s tcell.Screen) {
 	visibleLines := contentHeight - 1 // Leave room for scroll indicator
 
 	// Draw help content with scrolling
-	contentStyle := tcell.StyleDefault.Background(tcell.ColorDarkBlue).Foreground(tcell.ColorWhite)
+	contentStyle := tcell.StyleDefault.Background(ColorBgHighlight).Foreground(ColorFg)
 	for i := 0; i < visibleLines && i+h.scrollOffset < len(helpLines); i++ {
 		lineIndex := i + h.scrollOffset
 		line := helpLines[lineIndex]
@@ -149,7 +149,7 @@ func (h *HelpDialog) Draw(s tcell.Screen) {
 
 	// Draw scroll indicator if content is scrollable
 	if len(helpLines) > visibleLines {
-		scrollStyle := tcell.StyleDefault.Background(tcell.ColorDarkBlue).Foreground(tcell.ColorGray)
+		scrollStyle := tcell.StyleDefault.Background(ColorBgHighlight).Foreground(ColorDimmed)
 		scrollInfo := ""
 		
 		if h.scrollOffset > 0 && h.scrollOffset+visibleLines < len(helpLines) {
@@ -169,7 +169,7 @@ func (h *HelpDialog) Draw(s tcell.Screen) {
 	} else {
 		// Standard close message when no scrolling needed
 		closeMsg := "Press Esc or ? to close this help dialog"
-		scrollStyle := tcell.StyleDefault.Background(tcell.ColorDarkBlue).Foreground(tcell.ColorGray)
+		scrollStyle := tcell.StyleDefault.Background(ColorBgHighlight).Foreground(ColorDimmed)
 		scrollX := startX + (dialogWidth-len(closeMsg))/2
 		if scrollX < startX+2 {
 			scrollX = startX + 2
@@ -235,6 +235,7 @@ func (h *HelpDialog) getHelpContent() []string {
 		"",
 		"Episode View:",
 		"  Description window shows details of selected episode",
+		"  Alt+j / Alt+k Scroll description down/up",
 		"",
 		"Search (Podcast/Episode List):",
 		"  /             Enter search mode to filter items",

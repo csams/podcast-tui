@@ -22,6 +22,7 @@ type EpisodeListView struct {
 	scrollOffset    int
 	screenHeight    int
 	searchState     *SearchState
+	descScrollOffset int  // Scroll offset for description window
 }
 
 func NewEpisodeListView() *EpisodeListView {
@@ -81,8 +82,12 @@ func (v *EpisodeListView) Draw(s tcell.Screen) {
 		descriptionHeight = 2
 	}
 
-	// Draw episode list header
-	drawText(s, 0, 0, tcell.StyleDefault.Bold(true), "Episodes")
+	// Draw episode list header with podcast name
+	headerText := "Episodes"
+	if v.currentPodcast != nil && v.currentPodcast.Title != "" {
+		headerText = fmt.Sprintf("Episodes - %s", v.currentPodcast.Title)
+	}
+	drawText(s, 0, 0, tcell.StyleDefault.Bold(true), headerText)
 	for x := 0; x < w; x++ {
 		s.SetContent(x, 1, '─', nil, tcell.StyleDefault)
 	}
@@ -92,7 +97,7 @@ func (v *EpisodeListView) Draw(s tcell.Screen) {
 
 	// Show search query if active
 	if v.searchState.query != "" {
-		searchStyle := tcell.StyleDefault.Foreground(tcell.ColorYellow)
+		searchStyle := tcell.StyleDefault.Foreground(ColorHighlight)
 		modeText := ""
 		switch v.searchState.GetMinScore() {
 		case ScoreThresholdStrict:
@@ -119,14 +124,38 @@ func (v *EpisodeListView) Draw(s tcell.Screen) {
 		isCurrentEpisode := v.currentEpisode != nil && episode.ID == v.currentEpisode.ID
 		
 		if isSelected {
-			style = style.Background(tcell.ColorDarkBlue).Foreground(tcell.ColorWhite)
+			style = style.Background(ColorSelection).Foreground(ColorBright)
 		} else if isCurrentEpisode {
 			// Highlight currently playing/paused episode with a different color
-			style = style.Background(tcell.ColorDarkGreen).Foreground(tcell.ColorWhite)
+			style = style.Background(ColorGreen).Foreground(ColorBgDark)
 		}
 
 		// Draw episode row in table format
 		v.drawEpisodeRow(s, i+3, w, episode, isSelected, style)
+	}
+	
+	// Show scroll indicator if there are more items than visible
+	if len(episodes) > visibleHeight {
+		scrollStyle := tcell.StyleDefault.Foreground(ColorDimmed)
+		// Calculate visible range
+		firstVisible := v.scrollOffset + 1
+		lastVisible := v.scrollOffset + visibleHeight
+		if lastVisible > len(episodes) {
+			lastVisible = len(episodes)
+		}
+		scrollInfo := fmt.Sprintf("[%d-%d/%d]", firstVisible, lastVisible, len(episodes))
+		
+		// Position in the title bar, but not overlapping with search info or header text
+		scrollX := len(headerText) + 2
+		if v.searchState.query != "" {
+			// If search is active, make sure we don't overlap
+			searchTextLen := len(fmt.Sprintf("Filter: %s (%d matches)", v.searchState.query, len(v.filteredEpisodes))) + 10
+			maxScrollX := w - searchTextLen - 2 - len(scrollInfo)
+			if scrollX > maxScrollX {
+				scrollX = maxScrollX
+			}
+		}
+		drawText(s, scrollX, 0, scrollStyle, scrollInfo)
 	}
 
 	// Draw description window at the bottom
@@ -138,28 +167,48 @@ func (v *EpisodeListView) Draw(s tcell.Screen) {
 func (v *EpisodeListView) HandleKey(ev *tcell.EventKey) bool {
 	switch ev.Key() {
 	case tcell.KeyRune:
+		// Check for Alt+j and Alt+k
+		if ev.Modifiers()&tcell.ModAlt != 0 {
+			switch ev.Rune() {
+			case 'j':
+				// Scroll description down
+				v.descScrollOffset++
+				return true
+			case 'k':
+				// Scroll description up
+				if v.descScrollOffset > 0 {
+					v.descScrollOffset--
+				}
+				return true
+			}
+		}
+		
 		switch ev.Rune() {
 		case 'j':
 			episodes := v.getActiveEpisodes()
 			if v.selectedIdx < len(episodes)-1 {
 				v.selectedIdx++
 				v.ensureVisible()
+				v.descScrollOffset = 0  // Reset description scroll when changing episodes
 				return true
 			}
 		case 'k':
 			if v.selectedIdx > 0 {
 				v.selectedIdx--
 				v.ensureVisible()
+				v.descScrollOffset = 0  // Reset description scroll when changing episodes
 				return true
 			}
 		case 'g':
 			v.selectedIdx = 0
 			v.scrollOffset = 0
+			v.descScrollOffset = 0  // Reset description scroll
 			return true
 		case 'G':
 			episodes := v.getActiveEpisodes()
 			v.selectedIdx = len(episodes) - 1
 			v.ensureVisible()
+			v.descScrollOffset = 0  // Reset description scroll
 			return true
 		}
 	}
@@ -236,6 +285,7 @@ func (v *EpisodeListView) HandlePageDown() bool {
 	if newIdx != v.selectedIdx {
 		v.selectedIdx = newIdx
 		v.ensureVisible()
+		v.descScrollOffset = 0  // Reset description scroll when changing episodes
 		return true
 	}
 	return false
@@ -274,6 +324,7 @@ func (v *EpisodeListView) HandlePageUp() bool {
 	if newIdx != v.selectedIdx {
 		v.selectedIdx = newIdx
 		v.ensureVisible()
+		v.descScrollOffset = 0  // Reset description scroll when changing episodes
 		return true
 	}
 	return false
@@ -281,14 +332,14 @@ func (v *EpisodeListView) HandlePageUp() bool {
 
 // drawTableHeader draws the column headers for the episode table
 func (v *EpisodeListView) drawTableHeader(s tcell.Screen, y, width int) {
-	headerStyle := tcell.StyleDefault.Bold(true).Foreground(tcell.ColorYellow)
+	headerStyle := tcell.StyleDefault.Bold(true).Foreground(ColorHeader)
 
 	// Calculate column widths
 	columns := v.calculateColumnWidths(width)
 
 	// Draw headers with padding
-	x := 0
-	drawText(s, x, y, headerStyle, "St")
+	x := 1 // Start with 1 char padding from left edge
+	drawText(s, x, y, headerStyle, "Local")
 	x += columns.status + 1 // Add 1 space padding
 
 	drawText(s, x, y, headerStyle, "Title")
@@ -312,13 +363,13 @@ func (v *EpisodeListView) drawEpisodeRow(s tcell.Screen, y, width int, episode *
 		}
 	}
 
-	// Draw selection indicator and download status
-	x := 0
+	// Draw selection indicator and download status with left padding
+	x := 1 // Start with 1 char padding from left edge
 	statusText := ""
 	if selected {
-		statusText = ">"
+		statusText = "> " // Add space after selection indicator
 	} else {
-		statusText = " "
+		statusText = "  " // Two spaces to align when not selected
 	}
 	
 	// Add download indicator
@@ -361,14 +412,15 @@ type columnWidths struct {
 func (v *EpisodeListView) calculateColumnWidths(totalWidth int) columnWidths {
 	// Define minimum and preferred column widths
 	const (
-		statusMin   = 8  // ">[⬇100%] " - widest possible status indicator
+		statusMin   = 9  // ">[⬇100%] " - widest possible status indicator, plus "Local" header needs 5 chars
 		dateMin     = 10 // "2024-01-15"
 		positionMin = 12 // "15:30/45:30"
 	)
 
 	// Calculate available width after accounting for fixed columns and padding
 	const padding = 3 // One space between each of the 4 columns (3 spaces total)
-	fixedWidth := statusMin + dateMin + positionMin + padding
+	const edgePadding = 2 // 1 char padding on left and right edges
+	fixedWidth := statusMin + dateMin + positionMin + padding + edgePadding
 	availableForTitle := totalWidth - fixedWidth
 
 	// Ensure minimum title width
@@ -431,10 +483,11 @@ func (v *EpisodeListView) drawColumnTextWithHighlight(s tcell.Screen, x, y, widt
 		highlightMap[pos] = true
 	}
 	
-	highlightStyle := style.Foreground(tcell.ColorYellow).Bold(true)
-	if style.Background(tcell.ColorDarkBlue) == style {
-		// If selected, use different highlight color
-		highlightStyle = style.Foreground(tcell.ColorBlack).Background(tcell.ColorYellow).Bold(true)
+	highlightStyle := style.Foreground(ColorHighlight).Bold(true)
+	// Check if this is a selected row by comparing background color
+	if style.Background(ColorSelection) == style || style.Background(ColorGreen) == style {
+		// If selected or playing, use inverted highlight color
+		highlightStyle = style.Foreground(ColorBgDark).Background(ColorHighlight).Bold(true)
 	}
 
 	// Convert text to runes for proper Unicode handling
@@ -533,6 +586,21 @@ func (v *EpisodeListView) formatDuration(d time.Duration) string {
 
 // drawDescriptionWindow renders the description window at the bottom of the screen
 func (v *EpisodeListView) drawDescriptionWindow(s tcell.Screen, startY, width, height int) {
+	// Get the actual screen height to ensure we clear everything
+	_, screenHeight := s.Size()
+	
+	// Clear from startY to the bottom of the screen (not just the allocated height)
+	// Force tcell to update by using different runes and styles
+	clearStyle := tcell.StyleDefault.Background(ColorBg).Foreground(ColorBg)
+	for y := startY; y < screenHeight; y++ {
+		for x := 0; x < width; x++ {
+			// First set to a different character to force update
+			s.SetContent(x, y, '\u00A0', nil, clearStyle) // Non-breaking space
+			// Then set to regular space
+			s.SetContent(x, y, ' ', nil, clearStyle)
+		}
+	}
+	
 	// Get selected episode description
 	selectedEpisode := v.GetSelected()
 	description := ""
@@ -541,11 +609,11 @@ func (v *EpisodeListView) drawDescriptionWindow(s tcell.Screen, startY, width, h
 	}
 
 	// Draw separator line
-	separatorStyle := tcell.StyleDefault.Foreground(tcell.ColorGray)
+	separatorStyle := tcell.StyleDefault.Foreground(ColorFgGutter)
 	for x := 0; x < width; x++ {
 		s.SetContent(x, startY, '─', nil, separatorStyle)
 	}
-
+	
 	// Draw description header
 	headerStyle := tcell.StyleDefault.Bold(true)
 	drawText(s, 0, startY+1, headerStyle, "Description")
@@ -574,25 +642,40 @@ func (v *EpisodeListView) drawDescriptionWindow(s tcell.Screen, startY, width, h
 		wrappedLines := v.wrapTextWithHighlights(cleanDesc, contentWidth, highlightPositions)
 
 		// Draw description lines (limit to available height)
-		descStyle := tcell.StyleDefault.Foreground(tcell.ColorWhite)
-		highlightStyle := tcell.StyleDefault.Foreground(tcell.ColorYellow).Bold(true)
+		descStyle := tcell.StyleDefault.Foreground(ColorFg)
+		highlightStyle := tcell.StyleDefault.Foreground(ColorHighlight).Bold(true)
 		maxLines := height - 3 // Account for separator, header, and padding
 
-		for i, lineData := range wrappedLines {
-			if i >= maxLines {
-				break
-			}
-			v.drawLineWithHighlights(s, 1, startY+2+i, contentWidth, descStyle, highlightStyle, lineData)
+		// Ensure scroll offset doesn't exceed content
+		maxScrollOffset := len(wrappedLines) - maxLines
+		if maxScrollOffset < 0 {
+			maxScrollOffset = 0
+		}
+		if v.descScrollOffset > maxScrollOffset {
+			v.descScrollOffset = maxScrollOffset
 		}
 
-		// Show truncation indicator if there are more lines
-		if len(wrappedLines) > maxLines && maxLines > 0 {
-			truncStyle := tcell.StyleDefault.Foreground(tcell.ColorDarkGray)
-			drawText(s, 1, startY+1+maxLines, truncStyle, "...")
+		// Draw visible lines based on scroll offset
+		for i := 0; i < maxLines; i++ {
+			lineY := startY + 2 + i
+			lineIdx := i + v.descScrollOffset
+			
+			// Draw content if available
+			if lineIdx < len(wrappedLines) {
+				v.drawLineWithHighlights(s, 1, lineY, contentWidth, descStyle, highlightStyle, wrappedLines[lineIdx])
+			}
+		}
+
+		// Show scroll indicators
+		if v.descScrollOffset > 0 || len(wrappedLines) > maxLines {
+			scrollStyle := tcell.StyleDefault.Foreground(ColorDimmed)
+			scrollInfo := fmt.Sprintf("[%d-%d/%d]", v.descScrollOffset+1, 
+				min(v.descScrollOffset+maxLines, len(wrappedLines)), len(wrappedLines))
+			drawText(s, width-len(scrollInfo)-2, startY+1, scrollStyle, scrollInfo)
 		}
 	} else {
 		// Show placeholder when no description available
-		placeholderStyle := tcell.StyleDefault.Foreground(tcell.ColorDarkGray)
+		placeholderStyle := tcell.StyleDefault.Foreground(ColorDimmed)
 		drawText(s, 1, startY+2, placeholderStyle, "No description available")
 	}
 }
@@ -824,7 +907,7 @@ func (v *EpisodeListView) getDownloadIndicator(episode *models.Episode) string {
 	}
 	
 	if v.downloadManager.IsEpisodeDownloaded(episode, podcastTitle) {
-		return "[D]"
+		return "✔"
 	}
 
 	// Only check download manager state if episode is NOT already downloaded
@@ -946,6 +1029,14 @@ func (v *EpisodeListView) adjustSelectionAfterFilter() {
 // GetSearchState returns the search state for external access
 func (v *EpisodeListView) GetSearchState() *SearchState {
 	return v.searchState
+}
+
+// min returns the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // UpdateSearch updates the search and applies filtering

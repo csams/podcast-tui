@@ -28,7 +28,8 @@ func (v *PodcastListView) calculateColumnWidths(totalWidth int) podcastColumnWid
 
 	// Calculate available width after accounting for fixed columns and padding
 	const padding = 3 // One space between each of the 4 columns (3 spaces total)
-	fixedWidth := statusMin + latestMin + countMin + padding
+	const edgePadding = 2 // 1 char padding on left and right edges
+	fixedWidth := statusMin + latestMin + countMin + padding + edgePadding
 	
 	// Split remaining width between title and URL (60/40 split)
 	availableWidth := totalWidth - fixedWidth
@@ -58,13 +59,13 @@ func (v *PodcastListView) calculateColumnWidths(totalWidth int) podcastColumnWid
 
 // drawTableHeader draws the column headers for the podcast table
 func (v *PodcastListView) drawTableHeader(s tcell.Screen, y, width int) {
-	headerStyle := tcell.StyleDefault.Bold(true).Foreground(tcell.ColorYellow)
+	headerStyle := tcell.StyleDefault.Bold(true).Foreground(ColorHeader)
 
 	// Calculate column widths
 	columns := v.calculateColumnWidths(width)
 
 	// Draw headers with padding
-	x := 0
+	x := 1 // Start with 1 char padding from left edge
 	x += columns.status // No header for status column
 	
 	drawText(s, x, y, headerStyle, "Title")
@@ -91,11 +92,11 @@ func (v *PodcastListView) drawPodcastRow(s tcell.Screen, y, width int, podcast *
 		}
 	}
 
-	// Draw selection indicator
-	x := 0
-	statusText := " "
+	// Draw selection indicator with left padding
+	x := 1 // Start with 1 char padding from left edge
+	statusText := "  " // Two spaces by default
 	if selected {
-		statusText = ">"
+		statusText = "> " // Selection indicator with space
 	}
 	v.drawColumnText(s, x, y, columns.status, statusText, style)
 	x += columns.status
@@ -103,7 +104,7 @@ func (v *PodcastListView) drawPodcastRow(s tcell.Screen, y, width int, podcast *
 	// Get match result if search is active
 	var matchResult *PodcastMatchResult
 	if v.searchState.query != "" {
-		if mr, ok := v.matchResults[podcast.ID]; ok {
+		if mr, ok := v.matchResults[podcast.URL]; ok {
 			matchResult = &mr
 		}
 	}
@@ -116,22 +117,13 @@ func (v *PodcastListView) drawPodcastRow(s tcell.Screen, y, width int, podcast *
 	}
 	x += columns.title + 1
 
-	// Draw URL (truncated)
-	if matchResult != nil && matchResult.MatchField == "url" {
-		v.drawColumnTextWithHighlight(s, x, y, columns.url, podcast.URL, style, matchResult.Positions)
-	} else {
-		v.drawColumnText(s, x, y, columns.url, podcast.URL, style)
-	}
+	// Draw URL (no highlighting - not searchable)
+	v.drawColumnText(s, x, y, columns.url, podcast.URL, style)
 	x += columns.url + 1
 
-	// Draw latest episode date (or title if that's what matched)
-	if matchResult != nil && matchResult.MatchField == "latest" && len(podcast.Episodes) > 0 {
-		// Show latest episode title instead of date when it matches
-		v.drawColumnTextWithHighlight(s, x, y, columns.latest, podcast.Episodes[0].Title, style, matchResult.Positions)
-	} else {
-		latestDate := v.getLatestEpisodeDate(podcast)
-		v.drawColumnText(s, x, y, columns.latest, latestDate, style)
-	}
+	// Draw latest episode date (always show date, no highlighting)
+	latestDate := v.getLatestEpisodeDate(podcast)
+	v.drawColumnText(s, x, y, columns.latest, latestDate, style)
 	x += columns.latest + 1
 
 	// Draw episode count
@@ -186,10 +178,10 @@ func (v *PodcastListView) drawColumnTextWithHighlight(s tcell.Screen, x, y, widt
 		highlightMap[pos] = true
 	}
 	
-	highlightStyle := style.Foreground(tcell.ColorYellow).Bold(true)
-	if style.Background(tcell.ColorDarkBlue) == style {
+	highlightStyle := style.Foreground(ColorHighlight).Bold(true)
+	if style.Background(ColorSelection) == style {
 		// If selected, use different highlight color
-		highlightStyle = style.Foreground(tcell.ColorBlack).Background(tcell.ColorYellow).Bold(true)
+		highlightStyle = style.Foreground(ColorBgDark).Background(ColorHighlight).Bold(true)
 	}
 
 	// Convert text to runes for proper Unicode handling

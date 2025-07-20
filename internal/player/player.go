@@ -53,13 +53,18 @@ type mpvResponse struct {
 }
 
 func New() *Player {
-	return &Player{
+	p := &Player{
 		progressCh: make(chan Progress, 1),
 		socketPath: fmt.Sprintf("/tmp/mpv-socket-%d", os.Getpid()),
 		volume:     100,
 		speed:      1.0,
 		state:      StateStopped,
 	}
+	
+	// Clean up any stale socket from previous run
+	os.Remove(p.socketPath)
+	
+	return p
 }
 
 // StartIdle starts mpv in idle mode, ready to play tracks instantly
@@ -359,6 +364,21 @@ func (p *Player) Stop() error {
 	return p.stop()
 }
 
+// Cleanup ensures all resources are properly released
+// This should be called when the application is shutting down
+func (p *Player) Cleanup() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	
+	// Force stop if still running
+	if p.cmd != nil {
+		p.stop()
+	}
+	
+	// Final cleanup of socket file
+	os.Remove(p.socketPath)
+}
+
 // StopKeepIdle stops playback but keeps mpv running in idle mode
 func (p *Player) StopKeepIdle() error {
 	p.mu.Lock()
@@ -400,7 +420,7 @@ func (p *Player) StopKeepIdle() error {
 }
 
 func (p *Player) stop() error {
-	if p.state == StateStopped {
+	if p.state == StateStopped && p.cmd == nil {
 		return nil
 	}
 
@@ -435,17 +455,34 @@ func (p *Player) stop() error {
 			// Process exited gracefully
 		case <-time.After(500 * time.Millisecond):
 			// Force kill if not exited
-			p.cmd.Process.Kill()
+			log.Printf("Force killing mpv process (pid: %d)", p.cmd.Process.Pid)
+			if err := p.cmd.Process.Kill(); err != nil {
+				log.Printf("Error killing mpv process: %v", err)
+			}
 			<-done // Wait for process to exit
+		}
+		
+		// Ensure process is really dead by checking ProcessState
+		if p.cmd.ProcessState == nil || !p.cmd.ProcessState.Exited() {
+			log.Printf("Warning: mpv process may not have exited cleanly")
 		}
 	}
 
-	// Clean up socket file
-	os.Remove(p.socketPath)
+	// Clean up socket file - try multiple times in case it's still in use
+	for i := 0; i < 3; i++ {
+		if err := os.Remove(p.socketPath); err == nil || os.IsNotExist(err) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 	
-	// Reset command pointer
+	// Reset state
 	p.cmd = nil
+	p.url = ""
+	p.position = 0
+	p.duration = 0
 
+	log.Printf("Player stopped and cleaned up")
 	return nil
 }
 

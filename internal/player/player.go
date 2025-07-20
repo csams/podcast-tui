@@ -442,6 +442,9 @@ func (p *Player) stop() error {
 
 	// Clean up socket file
 	os.Remove(p.socketPath)
+	
+	// Reset command pointer
+	p.cmd = nil
 
 	return nil
 }

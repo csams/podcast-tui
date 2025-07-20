@@ -100,17 +100,38 @@ func (v *PodcastListView) drawPodcastRow(s tcell.Screen, y, width int, podcast *
 	v.drawColumnText(s, x, y, columns.status, statusText, style)
 	x += columns.status
 
+	// Get match result if search is active
+	var matchResult *PodcastMatchResult
+	if v.searchState.query != "" {
+		if mr, ok := v.matchResults[podcast.ID]; ok {
+			matchResult = &mr
+		}
+	}
+
 	// Draw title
-	v.drawColumnText(s, x, y, columns.title, podcast.Title, style)
+	if matchResult != nil && matchResult.MatchField == "title" {
+		v.drawColumnTextWithHighlight(s, x, y, columns.title, podcast.Title, style, matchResult.Positions)
+	} else {
+		v.drawColumnText(s, x, y, columns.title, podcast.Title, style)
+	}
 	x += columns.title + 1
 
 	// Draw URL (truncated)
-	v.drawColumnText(s, x, y, columns.url, podcast.URL, style)
+	if matchResult != nil && matchResult.MatchField == "url" {
+		v.drawColumnTextWithHighlight(s, x, y, columns.url, podcast.URL, style, matchResult.Positions)
+	} else {
+		v.drawColumnText(s, x, y, columns.url, podcast.URL, style)
+	}
 	x += columns.url + 1
 
-	// Draw latest episode date
-	latestDate := v.getLatestEpisodeDate(podcast)
-	v.drawColumnText(s, x, y, columns.latest, latestDate, style)
+	// Draw latest episode date (or title if that's what matched)
+	if matchResult != nil && matchResult.MatchField == "latest" && len(podcast.Episodes) > 0 {
+		// Show latest episode title instead of date when it matches
+		v.drawColumnTextWithHighlight(s, x, y, columns.latest, podcast.Episodes[0].Title, style, matchResult.Positions)
+	} else {
+		latestDate := v.getLatestEpisodeDate(podcast)
+		v.drawColumnText(s, x, y, columns.latest, latestDate, style)
+	}
 	x += columns.latest + 1
 
 	// Draw episode count
@@ -124,25 +145,94 @@ func (v *PodcastListView) drawColumnText(s tcell.Screen, x, y, width int, text s
 		return
 	}
 
-	// Truncate text if it's too long for the column
-	if len(text) > width {
+	// Convert to runes for proper Unicode handling
+	runes := []rune(text)
+	displayRunes := runes
+
+	// Truncate by rune count if it's too long for the column
+	if len(runes) > width {
 		if width > 3 {
-			text = text[:width-3] + "..."
+			displayRunes = append(runes[:width-3], []rune("...")...)
 		} else {
-			text = text[:width]
+			displayRunes = runes[:width]
 		}
 	}
 
 	// Draw the text
-	for i, r := range text {
-		if i >= width {
+	charPos := 0
+	for _, r := range displayRunes {
+		if charPos >= width {
 			break
 		}
-		s.SetContent(x+i, y, r, nil, style)
+		s.SetContent(x+charPos, y, r, nil, style)
+		charPos++
 	}
 
 	// Pad remaining space in column
-	for i := len(text); i < width; i++ {
+	for i := charPos; i < width; i++ {
+		s.SetContent(x+i, y, ' ', nil, style)
+	}
+}
+
+// drawColumnTextWithHighlight draws text with highlighting at specified positions
+func (v *PodcastListView) drawColumnTextWithHighlight(s tcell.Screen, x, y, width int, text string, style tcell.Style, highlightPositions []int) {
+	if width <= 0 {
+		return
+	}
+
+	// Create highlight map
+	highlightMap := make(map[int]bool)
+	for _, pos := range highlightPositions {
+		highlightMap[pos] = true
+	}
+	
+	highlightStyle := style.Foreground(tcell.ColorYellow).Bold(true)
+	if style.Background(tcell.ColorDarkBlue) == style {
+		// If selected, use different highlight color
+		highlightStyle = style.Foreground(tcell.ColorBlack).Background(tcell.ColorYellow).Bold(true)
+	}
+
+	// Convert text to runes for proper Unicode handling
+	runes := []rune(text)
+	truncated := false
+	displayRunes := runes
+	
+	// Truncate by rune count, not byte count
+	if len(runes) > width {
+		truncated = true
+		if width > 3 {
+			displayRunes = runes[:width-3]
+		} else {
+			displayRunes = runes[:width]
+		}
+	}
+
+	// Draw the text with highlights
+	charPos := 0
+	for runeIdx, r := range displayRunes {
+		if charPos >= width {
+			break
+		}
+		
+		charStyle := style
+		if highlightMap[runeIdx] {
+			charStyle = highlightStyle
+		}
+		
+		s.SetContent(x+charPos, y, r, nil, charStyle)
+		charPos++
+	}
+	
+	// Add ellipsis if truncated
+	if truncated && width > 3 {
+		for i := 0; i < 3 && charPos < width; i++ {
+			s.SetContent(x+charPos, y, '.', nil, style)
+			charPos++
+		}
+	}
+
+	// Pad remaining space in column
+	for i := charPos; i < width; i++ {
 		s.SetContent(x+i, y, ' ', nil, style)
 	}
 }

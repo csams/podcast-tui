@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/csams/podcast-tui/internal/download"
@@ -32,6 +35,7 @@ type App struct {
 	helpDialog      *HelpDialog
 	confirmDialog   *ConfirmationDialog
 	configDir       string
+	shutdownOnce    sync.Once
 }
 
 type Mode int
@@ -88,10 +92,7 @@ func (a *App) Run() error {
 		if r := recover(); r != nil {
 			log.Printf("Panic during shutdown: %v", r)
 		}
-		// Save position and stop player
-		a.saveEpisodePosition()
-		a.player.Stop()
-		a.downloadManager.Stop()
+		a.shutdown()
 	}()
 
 	s.SetStyle(tcell.StyleDefault.Background(tcell.ColorBlack).Foreground(tcell.ColorWhite))
@@ -122,6 +123,16 @@ func (a *App) Run() error {
 	a.episodes.SetDownloadManager(a.downloadManager) // Pass download manager to episode list
 	a.currentView = a.podcasts
 
+	// Set up signal handling for graceful shutdown
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		log.Println("Received interrupt signal, shutting down...")
+		a.shutdown()
+		close(a.quit)
+	}()
+
 	go a.handleEvents()
 	go a.handleProgress()
 	go a.handleDownloadProgress()
@@ -129,23 +140,35 @@ func (a *App) Run() error {
 
 	<-a.quit
 
-	// Cleanup on shutdown
-	log.Println("Shutting down podcast-tui...")
-	
-	// Save current episode position one final time
-	a.saveEpisodePosition()
-	
-	// Gracefully stop the player
-	if err := a.player.Stop(); err != nil {
-		log.Printf("Error stopping player: %v", err)
-	}
-	
-	// Stop download manager
-	a.downloadManager.Stop()
-	
+	// Cleanup has already been initiated by quit handler
 	log.Println("Shutdown complete")
 
 	return nil
+}
+
+// shutdown performs all cleanup operations
+func (a *App) shutdown() {
+	// Prevent multiple shutdowns
+	a.shutdownOnce.Do(func() {
+		log.Println("Shutting down podcast-tui...")
+		
+		// Save current episode position one final time
+		a.saveEpisodePosition()
+		
+		// Stop the player and ensure mpv process is terminated
+		if a.player != nil {
+			log.Println("Stopping player...")
+			if err := a.player.Stop(); err != nil {
+				log.Printf("Error stopping player: %v", err)
+			}
+		}
+		
+		// Stop download manager
+		if a.downloadManager != nil {
+			log.Println("Stopping download manager...")
+			a.downloadManager.Stop()
+		}
+	})
 }
 
 func (a *App) handleEvents() {
@@ -179,9 +202,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 		case tcell.KeyRune:
 			switch ev.Rune() {
 			case 'q':
-				a.saveEpisodePosition()
-				a.player.Stop()
-				a.downloadManager.Stop()
+				a.shutdown()
 				close(a.quit)
 				return false
 			case 'j':
@@ -392,7 +413,16 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				}
 			case '/':
 				a.mode = ModeSearch
-				a.commandLine = ""
+				// Preserve existing search query when re-entering search mode
+				if a.currentView == a.episodes {
+					searchState := a.episodes.GetSearchState()
+					a.commandLine = searchState.query
+				} else if a.currentView == a.podcasts {
+					searchState := a.podcasts.GetSearchState()
+					a.commandLine = searchState.query
+				} else {
+					a.commandLine = ""
+				}
 				return true
 			case ':':
 				a.mode = ModeCommand
@@ -517,6 +547,82 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 			a.commandLine += string(ev.Rune())
 			return true
 		}
+	} else if a.mode == ModeSearch {
+		// Handle search mode with emacs-style editing
+		var searchState *SearchState
+		var updateFunc func()
+		
+		if a.currentView == a.episodes {
+			searchState = a.episodes.GetSearchState()
+			updateFunc = a.episodes.UpdateSearch
+		} else if a.currentView == a.podcasts {
+			searchState = a.podcasts.GetSearchState()
+			updateFunc = a.podcasts.UpdateSearch
+		} else {
+			// No search support for this view
+			a.mode = ModeNormal
+			return true
+		}
+		
+		prevQuery := searchState.query
+		
+		switch ev.Key() {
+		case tcell.KeyEscape, tcell.KeyEnter:
+			// Exit search mode but keep filter active
+			a.mode = ModeNormal
+			a.commandLine = ""
+			return true
+		case tcell.KeyBackspace, tcell.KeyBackspace2:
+			searchState.DeleteChar()
+		case tcell.KeyDelete:
+			searchState.DeleteCharForward()
+		case tcell.KeyCtrlD:
+			// Delete character under cursor (same as Delete key)
+			searchState.DeleteCharForward()
+		case tcell.KeyLeft:
+			searchState.MoveCursorLeft()
+		case tcell.KeyRight:
+			searchState.MoveCursorRight()
+		case tcell.KeyHome, tcell.KeyCtrlA:
+			searchState.MoveCursorStart()
+		case tcell.KeyEnd, tcell.KeyCtrlE:
+			searchState.MoveCursorEnd()
+		case tcell.KeyCtrlF:
+			// Move forward one character (same as Right)
+			searchState.MoveCursorRight()
+		case tcell.KeyCtrlB:
+			// Move backward one character (same as Left)
+			searchState.MoveCursorLeft()
+		case tcell.KeyCtrlK:
+			searchState.DeleteToEnd()
+		case tcell.KeyCtrlW:
+			searchState.DeleteWord()
+		case tcell.KeyCtrlU:
+			// Delete to beginning of line
+			searchState.MoveCursorStart()
+			searchState.DeleteToEnd()
+		case tcell.KeyRune:
+			// Check for Alt key combinations
+			if ev.Modifiers()&tcell.ModAlt != 0 {
+				switch ev.Rune() {
+				case 'f', 'F':
+					searchState.MoveCursorWordForward()
+				case 'b', 'B':
+					searchState.MoveCursorWordBackward()
+				case 'd', 'D':
+					searchState.DeleteWordForward()
+				}
+			} else {
+				searchState.InsertChar(ev.Rune())
+			}
+		}
+		
+		// Update command line display and apply filter if query changed
+		a.commandLine = searchState.query
+		if searchState.query != prevQuery {
+			updateFunc()
+		}
+		return true
 	}
 
 	return false
@@ -637,10 +743,38 @@ func (a *App) drawStatusBar() {
 	case ModeCommand:
 		modeStr = ":" + a.commandLine
 	case ModeSearch:
-		modeStr = "/" + a.commandLine
+		// Show search with cursor position for episode view
+		if a.currentView == a.episodes {
+			searchState := a.episodes.GetSearchState()
+			modeStr = "/" + searchState.query
+		} else {
+			modeStr = "/" + a.commandLine
+		}
 	}
 
 	drawText(a.screen, 0, h-1, style, modeStr)
+	
+	// Draw cursor for search mode
+	if a.mode == ModeSearch {
+		var searchState *SearchState
+		if a.currentView == a.episodes {
+			searchState = a.episodes.GetSearchState()
+		} else if a.currentView == a.podcasts {
+			searchState = a.podcasts.GetSearchState()
+		}
+		
+		if searchState != nil {
+			cursorX := 1 + searchState.cursorPos // 1 for the "/" prefix
+			cursorStyle := style.Reverse(true)
+			if searchState.cursorPos < len(searchState.query) {
+				// Highlight the character at cursor position
+				a.screen.SetContent(cursorX, h-1, rune(searchState.query[searchState.cursorPos]), nil, cursorStyle)
+			} else {
+				// Cursor at end of line - show a space with reverse video
+				a.screen.SetContent(cursorX, h-1, ' ', nil, cursorStyle)
+			}
+		}
+	}
 
 	// Show player status with progress
 	playerStatus := a.formatPlayerStatus(w)
@@ -664,8 +798,40 @@ func (a *App) drawStatusBar() {
 }
 
 func drawText(s tcell.Screen, x, y int, style tcell.Style, text string) {
-	for i, r := range text {
-		s.SetContent(x+i, y, r, nil, style)
+	pos := 0
+	for _, r := range text {
+		s.SetContent(x+pos, y, r, nil, style)
+		pos++
+	}
+}
+
+// drawTextWithHighlight draws text with specified positions highlighted
+func drawTextWithHighlight(s tcell.Screen, x, y, maxWidth int, style tcell.Style, text string, highlightPositions []int) {
+	// Create a map for quick position lookup
+	highlightMap := make(map[int]bool)
+	for _, pos := range highlightPositions {
+		highlightMap[pos] = true
+	}
+	
+	highlightStyle := style.Foreground(tcell.ColorYellow).Bold(true)
+	
+	// Convert text to runes for proper Unicode handling
+	runes := []rune(text)
+	
+	// Draw the text with highlights
+	screenPos := 0
+	for runeIdx, r := range runes {
+		if screenPos >= maxWidth {
+			break
+		}
+		
+		charStyle := style
+		if highlightMap[runeIdx] {
+			charStyle = highlightStyle
+		}
+		
+		s.SetContent(x+screenPos, y, r, nil, charStyle)
+		screenPos++
 	}
 }
 
@@ -683,9 +849,7 @@ func (a *App) executeCommand() {
 		}
 		go a.addPodcast(parts[1])
 	case "q", "quit":
-		a.saveEpisodePosition()
-		a.player.Stop()
-		a.downloadManager.Stop()
+		a.shutdown()
 		close(a.quit)
 	}
 }

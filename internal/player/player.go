@@ -1,0 +1,753 @@
+package player
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"os/exec"
+	"sync"
+	"time"
+)
+
+type PlayerState int
+
+const (
+	StateStopped PlayerState = iota
+	StatePlaying
+	StatePaused
+)
+
+type Player struct {
+	cmd        *exec.Cmd
+	url        string
+	state      PlayerState
+	position   time.Duration
+	duration   time.Duration
+	volume     int
+	speed      float64
+	isMuted    bool
+	mu         sync.Mutex
+	stopCh     chan struct{}
+	progressCh chan Progress
+	socketPath string
+	watchOnce  sync.Once
+}
+
+type Progress struct {
+	Position time.Duration
+	Duration time.Duration
+}
+
+type mpvCommand struct {
+	Command   []interface{} `json:"command"`
+	RequestID int           `json:"request_id,omitempty"`
+}
+
+type mpvResponse struct {
+	Data      interface{} `json:"data"`
+	RequestID int         `json:"request_id"`
+	Error     string      `json:"error"`
+}
+
+func New() *Player {
+	return &Player{
+		progressCh: make(chan Progress, 1),
+		socketPath: fmt.Sprintf("/tmp/mpv-socket-%d", os.Getpid()),
+		volume:     100,
+		speed:      1.0,
+		state:      StateStopped,
+	}
+}
+
+// StartIdle starts mpv in idle mode, ready to play tracks instantly
+func (p *Player) StartIdle() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Already running
+	if p.cmd != nil && p.state != StateStopped {
+		return nil
+	}
+
+	// Clean up any existing socket file
+	os.Remove(p.socketPath)
+
+	// Start mpv in idle mode
+	p.cmd = exec.Command("mpv",
+		"--no-video",
+		"--really-quiet",
+		"--no-terminal",
+		fmt.Sprintf("--input-ipc-server=%s", p.socketPath),
+		"--idle",
+		"--force-window=no",
+	)
+
+	if err := p.cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start mpv in idle mode: %w", err)
+	}
+
+	// Wait for mpv to create the socket with timeout
+	socketReady := false
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(p.socketPath); err == nil {
+			socketReady = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !socketReady {
+		p.cmd.Process.Kill()
+		p.cmd.Wait()
+		p.cmd = nil
+		return fmt.Errorf("mpv socket not created after timeout")
+	}
+
+	// mpv is now running in idle mode, ready to accept commands
+	log.Println("mpv started in idle mode, ready for instant playback")
+	return nil
+}
+
+// SwitchTrack switches to a new track without stopping mpv
+func (p *Player) SwitchTrack(url string) error {
+	p.mu.Lock()
+	
+	if p.state == StateStopped || p.cmd == nil {
+		// No player running, use regular Play
+		p.mu.Unlock()
+		return p.Play(url)
+	}
+
+	// Update URL
+	p.url = url
+	p.position = 0
+	p.duration = 0
+
+	// Load the new file
+	loadCmd := mpvCommand{
+		Command: []interface{}{"loadfile", url},
+	}
+
+	resp, err := p.sendCommand(loadCmd)
+	if err != nil {
+		// If command fails, fallback to regular play
+		p.mu.Unlock()
+		return p.Play(url)
+	}
+	
+	// Check if loadfile succeeded
+	if resp != nil && resp.Error != "success" && resp.Error != "" {
+		p.mu.Unlock()
+		return p.Play(url)
+	}
+
+	// Ensure playback is not paused
+	unpauseCmd := mpvCommand{
+		Command: []interface{}{"set_property", "pause", false},
+	}
+	if _, err := p.sendCommand(unpauseCmd); err != nil {
+		log.Printf("Warning: failed to unpause after track switch: %v", err)
+	}
+	
+	// Reset state to playing (not paused)
+	p.state = StatePlaying
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *Player) Play(url string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// If we have an idle mpv running, just load the file
+	if p.cmd != nil && p.state == StateStopped {
+		p.url = url
+		p.position = 0
+		p.duration = 0
+		
+		// Load the file
+		loadCmd := mpvCommand{
+			Command: []interface{}{"loadfile", url},
+		}
+		
+		if _, err := p.sendCommand(loadCmd); err == nil {
+			// Ensure playback is not paused
+			unpauseCmd := mpvCommand{
+				Command: []interface{}{"set_property", "pause", false},
+			}
+			if _, err := p.sendCommand(unpauseCmd); err != nil {
+				log.Printf("Warning: failed to unpause after loading file: %v", err)
+			}
+			
+			p.state = StatePlaying
+			go p.watchProgress()
+			return nil
+		}
+		// If loading failed, fall through to start new mpv
+	}
+
+	if p.state != StateStopped {
+		p.stop()
+	}
+
+	// Clean up any existing socket file
+	os.Remove(p.socketPath)
+
+	p.url = url
+	p.position = 0
+	p.duration = 0
+	p.stopCh = make(chan struct{})
+	p.watchOnce = sync.Once{}
+
+	// Start mpv in idle mode first, then load the URL
+	p.cmd = exec.Command("mpv",
+		"--no-video",
+		"--really-quiet",
+		"--no-terminal",
+		fmt.Sprintf("--input-ipc-server=%s", p.socketPath),
+		"--idle",
+		"--force-window=no",
+	)
+
+	if err := p.cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start player: %w", err)
+	}
+
+	// Wait for mpv to create the socket with timeout
+	socketReady := false
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(p.socketPath); err == nil {
+			socketReady = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !socketReady {
+		p.cmd.Process.Kill()
+		p.cmd.Wait()
+		return fmt.Errorf("mpv socket not created after timeout")
+	}
+
+	// Load the URL via IPC command
+	loadCmd := mpvCommand{
+		Command: []interface{}{"loadfile", url},
+	}
+
+	if _, err := p.sendCommand(loadCmd); err != nil {
+		p.cmd.Process.Kill()
+		p.cmd.Wait()
+		return fmt.Errorf("failed to load file: %w", err)
+	}
+
+	// Verify playback actually started
+	verifyCmd := mpvCommand{
+		Command: []interface{}{"get_property", "idle-active"},
+	}
+	resp, err := p.sendCommand(verifyCmd)
+	if err == nil && resp.Data == false {
+		p.state = StatePlaying
+		go p.watchProgress()
+		return nil
+	}
+
+	// Playback failed to start
+	p.cmd.Process.Kill()
+	p.cmd.Wait()
+	return fmt.Errorf("failed to start playback")
+}
+
+// sendCommand sends a command to mpv via IPC socket
+func (p *Player) sendCommand(cmd mpvCommand) (*mpvResponse, error) {
+	conn, err := net.Dial("unix", p.socketPath)
+	if err != nil {
+		// If we can't connect, the player process likely died
+		p.mu.Lock()
+		p.state = StateStopped
+		p.mu.Unlock()
+		return nil, fmt.Errorf("failed to connect to mpv socket: %w", err)
+	}
+	defer conn.Close()
+
+	// Set a timeout for the connection
+	conn.SetDeadline(time.Now().Add(2 * time.Second))
+
+	// Send command
+	data, err := json.Marshal(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal command: %w", err)
+	}
+	data = append(data, '\n')
+
+	if _, err := conn.Write(data); err != nil {
+		return nil, fmt.Errorf("failed to write command: %w", err)
+	}
+
+	// Read response
+	reader := bufio.NewReader(conn)
+	responseData, err := reader.ReadBytes('\n')
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	var response mpvResponse
+	if err := json.Unmarshal(responseData, &response); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
+	}
+
+	if response.Error != "" && response.Error != "success" {
+		return &response, fmt.Errorf("mpv error: %s", response.Error)
+	}
+
+	return &response, nil
+}
+
+func (p *Player) Pause() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.state != StatePlaying {
+		return nil
+	}
+
+	cmd := mpvCommand{
+		Command: []interface{}{"set_property", "pause", true},
+	}
+
+	if _, err := p.sendCommand(cmd); err != nil {
+		return fmt.Errorf("failed to pause: %w", err)
+	}
+
+	p.state = StatePaused
+	return nil
+}
+
+func (p *Player) Resume() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.state != StatePaused {
+		return nil
+	}
+
+	cmd := mpvCommand{
+		Command: []interface{}{"set_property", "pause", false},
+	}
+
+	if _, err := p.sendCommand(cmd); err != nil {
+		return fmt.Errorf("failed to resume: %w", err)
+	}
+
+	p.state = StatePlaying
+	return nil
+}
+
+func (p *Player) TogglePause() error {
+	if p.state == StatePaused {
+		return p.Resume()
+	}
+	return p.Pause()
+}
+
+func (p *Player) Stop() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.stop()
+}
+
+// StopKeepIdle stops playback but keeps mpv running in idle mode
+func (p *Player) StopKeepIdle() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.state == StateStopped {
+		return nil
+	}
+
+	// Stop playback but keep mpv running
+	stopCmd := mpvCommand{
+		Command: []interface{}{"stop"},
+	}
+	
+	if _, err := p.sendCommand(stopCmd); err != nil {
+		// If command fails, fallback to full stop
+		return p.stop()
+	}
+
+	// Mark as stopped
+	p.state = StateStopped
+	
+	// Signal watch goroutine to stop
+	if p.stopCh != nil {
+		select {
+		case <-p.stopCh:
+			// Already closed
+		default:
+			close(p.stopCh)
+		}
+	}
+
+	// Reset playback state
+	p.position = 0
+	p.duration = 0
+	p.url = ""
+
+	return nil
+}
+
+func (p *Player) stop() error {
+	if p.state == StateStopped {
+		return nil
+	}
+
+	// Mark as stopped first to prevent new operations
+	p.state = StateStopped
+
+	// Signal watch goroutine to stop
+	if p.stopCh != nil {
+		select {
+		case <-p.stopCh:
+			// Already closed
+		default:
+			close(p.stopCh)
+		}
+	}
+
+	if p.cmd != nil && p.cmd.Process != nil {
+		// Try graceful quit first
+		quitCmd := mpvCommand{
+			Command: []interface{}{"quit"},
+		}
+		p.sendCommand(quitCmd)
+		
+		// Give it a moment to quit gracefully
+		done := make(chan error, 1)
+		go func() {
+			done <- p.cmd.Wait()
+		}()
+		
+		select {
+		case <-done:
+			// Process exited gracefully
+		case <-time.After(500 * time.Millisecond):
+			// Force kill if not exited
+			p.cmd.Process.Kill()
+			<-done // Wait for process to exit
+		}
+	}
+
+	// Clean up socket file
+	os.Remove(p.socketPath)
+
+	return nil
+}
+
+func (p *Player) Seek(seconds int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.state == StateStopped {
+		return nil
+	}
+
+	// For resuming playback, use absolute seek if the value is large
+	// This assumes values > 300 (5 minutes) are absolute positions for resuming
+	seekType := "relative"
+	if seconds > 300 {
+		seekType = "absolute"
+	}
+
+	cmd := mpvCommand{
+		Command: []interface{}{"seek", seconds, seekType},
+	}
+
+	if _, err := p.sendCommand(cmd); err != nil {
+		return fmt.Errorf("failed to seek: %w", err)
+	}
+
+	return nil
+}
+
+// Volume control methods
+func (p *Player) GetVolume() (int, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.state == StateStopped {
+		return p.volume, nil
+	}
+
+	cmd := mpvCommand{
+		Command: []interface{}{"get_property", "volume"},
+	}
+
+	resp, err := p.sendCommand(cmd)
+	if err != nil {
+		return p.volume, err
+	}
+
+	if vol, ok := resp.Data.(float64); ok {
+		p.volume = int(vol)
+	}
+
+	return p.volume, nil
+}
+
+func (p *Player) SetVolume(volume int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if volume < 0 {
+		volume = 0
+	} else if volume > 100 {
+		volume = 100
+	}
+
+	p.volume = volume
+
+	if p.state == StateStopped {
+		return nil
+	}
+
+	cmd := mpvCommand{
+		Command: []interface{}{"set_property", "volume", volume},
+	}
+
+	if _, err := p.sendCommand(cmd); err != nil {
+		return fmt.Errorf("failed to set volume: %w", err)
+	}
+
+	return nil
+}
+
+// Speed control methods
+func (p *Player) GetSpeed() (float64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.state == StateStopped {
+		return p.speed, nil
+	}
+
+	cmd := mpvCommand{
+		Command: []interface{}{"get_property", "speed"},
+	}
+
+	resp, err := p.sendCommand(cmd)
+	if err != nil {
+		return p.speed, err
+	}
+
+	if speed, ok := resp.Data.(float64); ok {
+		p.speed = speed
+	}
+
+	return p.speed, nil
+}
+
+func (p *Player) SetSpeed(speed float64) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if speed < 0.25 {
+		speed = 0.25
+	} else if speed > 4.0 {
+		speed = 4.0
+	}
+
+	p.speed = speed
+
+	if p.state == StateStopped {
+		return nil
+	}
+
+	cmd := mpvCommand{
+		Command: []interface{}{"set_property", "speed", speed},
+	}
+
+	if _, err := p.sendCommand(cmd); err != nil {
+		return fmt.Errorf("failed to set speed: %w", err)
+	}
+
+	return nil
+}
+
+// Mute control
+func (p *Player) IsMuted() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.isMuted
+}
+
+func (p *Player) ToggleMute() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.isMuted = !p.isMuted
+
+	if p.state == StateStopped {
+		return nil
+	}
+
+	cmd := mpvCommand{
+		Command: []interface{}{"set_property", "mute", p.isMuted},
+	}
+
+	if _, err := p.sendCommand(cmd); err != nil {
+		return fmt.Errorf("failed to toggle mute: %w", err)
+	}
+
+	return nil
+}
+
+// Progress tracking methods
+func (p *Player) GetPosition() (time.Duration, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.state == StateStopped {
+		return p.position, nil
+	}
+
+	cmd := mpvCommand{
+		Command: []interface{}{"get_property", "time-pos"},
+	}
+
+	resp, err := p.sendCommand(cmd)
+	if err != nil {
+		// If property is unavailable, return cached position
+		if resp != nil && resp.Error == "property unavailable" {
+			return p.position, nil
+		}
+		return p.position, err
+	}
+
+	if pos, ok := resp.Data.(float64); ok && pos >= 0 {
+		p.position = time.Duration(pos * float64(time.Second))
+	}
+
+	return p.position, nil
+}
+
+func (p *Player) GetDuration() (time.Duration, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.state == StateStopped {
+		return p.duration, nil
+	}
+
+	cmd := mpvCommand{
+		Command: []interface{}{"get_property", "duration"},
+	}
+
+	resp, err := p.sendCommand(cmd)
+	if err != nil {
+		// If property is unavailable, return cached duration
+		if resp != nil && resp.Error == "property unavailable" {
+			return p.duration, nil
+		}
+		return p.duration, err
+	}
+
+	if dur, ok := resp.Data.(float64); ok && dur > 0 {
+		p.duration = time.Duration(dur * float64(time.Second))
+	}
+
+	return p.duration, nil
+}
+
+func (p *Player) IsPlaying() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.state == StatePlaying
+}
+
+func (p *Player) IsPaused() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.state == StatePaused
+}
+
+func (p *Player) GetState() PlayerState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.state
+}
+
+func (p *Player) Progress() chan Progress {
+	return p.progressCh
+}
+
+func (p *Player) watchProgress() {
+	// Ensure we only run one watch goroutine
+	p.watchOnce.Do(func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-p.stopCh:
+				return
+			case <-ticker.C:
+				// Check if we should still be watching
+				p.mu.Lock()
+				currentState := p.state
+				p.mu.Unlock()
+				
+				if currentState == StatePlaying {
+					// Get position
+					cmd := mpvCommand{
+						Command: []interface{}{"get_property", "time-pos"},
+					}
+
+					if resp, err := p.sendCommand(cmd); err == nil {
+						if pos, ok := resp.Data.(float64); ok && pos >= 0 {
+							p.mu.Lock()
+							p.position = time.Duration(pos * float64(time.Second))
+							p.mu.Unlock()
+						}
+					} else if err != nil {
+						// Check if mpv process died
+						if p.cmd != nil && p.cmd.ProcessState != nil && p.cmd.ProcessState.Exited() {
+							p.mu.Lock()
+							p.state = StateStopped
+							p.mu.Unlock()
+							log.Printf("Player: mpv process died unexpectedly")
+							return
+						}
+					}
+
+					// Get duration
+					cmd = mpvCommand{
+						Command: []interface{}{"get_property", "duration"},
+					}
+
+					if resp, err := p.sendCommand(cmd); err == nil {
+						if dur, ok := resp.Data.(float64); ok && dur > 0 {
+							p.mu.Lock()
+							p.duration = time.Duration(dur * float64(time.Second))
+							p.mu.Unlock()
+						}
+					}
+				}
+
+			p.mu.Lock()
+			progress := Progress{
+				Position: p.position,
+				Duration: p.duration,
+			}
+			p.mu.Unlock()
+
+			select {
+			case p.progressCh <- progress:
+			default:
+				}
+			}
+		}
+	})
+}

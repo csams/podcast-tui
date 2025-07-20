@@ -1,0 +1,34 @@
+{
+  "id": "podcast-episode-scroll",
+  "started": "2025-01-19T12:15:00Z",
+  "lastUpdated": "2025-01-19T12:20:00Z",
+  "status": "implemented",
+  "phase": "complete",
+  "progress": {
+    "discovery": { "answered": 5, "total": 5 },
+    "detail": { "answered": 5, "total": 5 }
+  },
+  "contextFiles": [
+    "/home/csams/projects/personal/podcast-tui/internal/ui/podcast_list.go",
+    "/home/csams/projects/personal/podcast-tui/internal/ui/episode_list.go", 
+    "/home/csams/projects/personal/podcast-tui/internal/ui/app.go",
+    "/home/csams/projects/personal/podcast-tui/internal/ui/help_dialog.go"
+  ],
+  "relatedFeatures": ["vim-style navigation", "table layout", "modal dialogs"],
+  "implementationSummary": {
+    "completed": "2025-01-19T12:20:00Z",
+    "filesModified": [
+      "internal/ui/podcast_list.go - Added ensureVisible() and page scroll methods",
+      "internal/ui/episode_list.go - Added ensureVisible(), page scroll methods, 10-line description", 
+      "internal/ui/app.go - Added Ctrl+F/B keybindings",
+      "internal/ui/help_dialog.go - Updated documentation"
+    ],
+    "featuresImplemented": [
+      "Smart centered scrolling with ensureVisible()",
+      "Vim-style page scrolling (Ctrl+F/B)",
+      "Enhanced 10-line description window",
+      "State management preserving scroll positions",
+      "Edge case handling for empty/small lists"
+    ]
+  }
+}

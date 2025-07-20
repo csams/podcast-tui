@@ -13,12 +13,23 @@ type SearchState struct {
 	cursorPos       int
 	caseSensitive   bool
 	lastQuery       string  // Previous query to detect changes
+	minScore        int     // Minimum score threshold for matches
 }
+
+// Score threshold constants (based on raw fzf scores)
+const (
+	ScoreThresholdStrict     = 70  // Only high quality matches  
+	ScoreThresholdNormal     = 50  // Balanced (default)
+	ScoreThresholdPermissive = 30  // Include marginal matches
+	ScoreThresholdNone       = 0   // Accept all matches
+)
+
 
 // NewSearchState creates a new search state
 func NewSearchState() *SearchState {
 	return &SearchState{
 		caseSensitive: false,
+		minScore:      ScoreThresholdNormal, // Default to balanced threshold
 	}
 }
 
@@ -32,6 +43,16 @@ func (s *SearchState) SetQuery(query string) {
 func (s *SearchState) Clear() {
 	s.query = ""
 	s.cursorPos = 0
+}
+
+// SetMinScore sets the minimum score threshold
+func (s *SearchState) SetMinScore(score int) {
+	s.minScore = score
+}
+
+// GetMinScore returns the current minimum score threshold
+func (s *SearchState) GetMinScore() int {
+	return s.minScore
 }
 
 // InsertChar inserts a character at the cursor position
@@ -226,16 +247,20 @@ func (s *SearchState) MatchEpisode(title, description string) (bool, int) {
 		return true, 0
 	}
 	
-	// Try matching title first (with bonus)
+	// Try matching title first
 	titleScore := s.matchScore(title)
 	if titleScore >= 0 {
-		return true, titleScore + 10000 // Big bonus for title matches
+		if s.minScore == 0 || titleScore >= s.minScore {
+			return true, titleScore
+		}
 	}
 	
 	// Try matching description
 	descScore := s.matchScore(description)
 	if descScore >= 0 {
-		return true, descScore
+		if s.minScore == 0 || descScore >= s.minScore {
+			return true, descScore
+		}
 	}
 	
 	return false, -1
@@ -247,23 +272,29 @@ func (s *SearchState) MatchPodcast(title, url, latestEpisode string) (bool, int)
 		return true, 0
 	}
 	
-	// Try matching title first (highest priority)
+	// Try matching title first
 	titleScore := s.matchScore(title)
 	if titleScore >= 0 {
-		return true, titleScore + 20000 // Highest bonus for title matches
+		if s.minScore == 0 || titleScore >= s.minScore {
+			return true, titleScore
+		}
 	}
 	
-	// Try matching URL (medium priority)
+	// Try matching URL
 	urlScore := s.matchScore(url)
 	if urlScore >= 0 {
-		return true, urlScore + 5000 // Medium bonus for URL matches
+		if s.minScore == 0 || urlScore >= s.minScore {
+			return true, urlScore
+		}
 	}
 	
-	// Try matching latest episode (lower priority)
+	// Try matching latest episode
 	if latestEpisode != "" {
 		episodeScore := s.matchScore(latestEpisode)
 		if episodeScore >= 0 {
-			return true, episodeScore
+			if s.minScore == 0 || episodeScore >= s.minScore {
+				return true, episodeScore
+			}
 		}
 	}
 	
@@ -276,17 +307,21 @@ func (s *SearchState) MatchEpisodeWithPositions(title, description string) (bool
 		return true, 0, MatchResult{Score: 0, Positions: nil}
 	}
 	
-	// Try matching title first (with bonus)
+	// Try matching title first
 	titleResult := s.matchWithPositions(title)
 	if titleResult.Score >= 0 {
-		titleResult.Score += 10000 // Big bonus for title matches
-		return true, titleResult.Score, titleResult
+		if s.minScore == 0 || titleResult.Score >= s.minScore {
+			return true, titleResult.Score, titleResult
+		}
 	}
 	
 	// Try matching description
 	descResult := s.matchWithPositions(description)
 	if descResult.Score >= 0 {
-		return true, descResult.Score, descResult
+		// Check if description match meets minimum score threshold
+		if s.minScore == 0 || descResult.Score >= s.minScore {
+			return true, descResult.Score, descResult
+		}
 	}
 	
 	return false, -1, MatchResult{Score: -1, Positions: nil}
@@ -298,25 +333,30 @@ func (s *SearchState) MatchPodcastWithPositions(title, url, latestEpisode string
 		return true, 0, MatchResult{Score: 0, Positions: nil}, ""
 	}
 	
-	// Try matching title first (highest priority)
+	// Try matching title first
 	titleResult := s.matchWithPositions(title)
 	if titleResult.Score >= 0 {
-		titleResult.Score += 20000 // Highest bonus for title matches
-		return true, titleResult.Score, titleResult, "title"
+		if s.minScore == 0 || titleResult.Score >= s.minScore {
+			return true, titleResult.Score, titleResult, "title"
+		}
 	}
 	
-	// Try matching URL (medium priority)
+	// Try matching URL
 	urlResult := s.matchWithPositions(url)
 	if urlResult.Score >= 0 {
-		urlResult.Score += 5000 // Medium bonus for URL matches
-		return true, urlResult.Score, urlResult, "url"
+		if s.minScore == 0 || urlResult.Score >= s.minScore {
+			return true, urlResult.Score, urlResult, "url"
+		}
 	}
 	
-	// Try matching latest episode (lower priority)
+	// Try matching latest episode
 	if latestEpisode != "" {
 		episodeResult := s.matchWithPositions(latestEpisode)
 		if episodeResult.Score >= 0 {
-			return true, episodeResult.Score, episodeResult, "latest"
+			// Latest episode matches need to meet threshold without bonus
+			if s.minScore == 0 || episodeResult.Score >= s.minScore {
+				return true, episodeResult.Score, episodeResult, "latest"
+			}
 		}
 	}
 	

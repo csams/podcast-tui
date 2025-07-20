@@ -60,7 +60,17 @@ func (v *PodcastListView) Draw(s tcell.Screen) {
 	// Show search query if active
 	if v.searchState.query != "" {
 		searchStyle := tcell.StyleDefault.Foreground(tcell.ColorYellow)
-		searchText := fmt.Sprintf("Filter: %s (%d matches)", v.searchState.query, len(v.filteredPodcasts))
+		modeText := ""
+		switch v.searchState.GetMinScore() {
+		case ScoreThresholdStrict:
+			modeText = "[Strict] "
+		case ScoreThresholdPermissive:
+			modeText = "[Permissive] "
+		case ScoreThresholdNone:
+			modeText = "[All] "
+		// Normal mode shows no prefix
+		}
+		searchText := fmt.Sprintf("%sFilter: %s (%d matches)", modeText, v.searchState.query, len(v.filteredPodcasts))
 		drawText(s, w-len(searchText)-2, 0, searchStyle, searchText)
 	}
 

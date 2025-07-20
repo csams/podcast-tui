@@ -253,6 +253,7 @@ func (h *HelpDialog) getHelpContent() []string {
 		"  Ctrl+W        Delete word before cursor",
 		"  Alt+D         Delete word after cursor",
 		"  Ctrl+D/Delete Delete character at cursor",
+		"  Ctrl+T        Toggle search quality filter",
 		"",
 		"Playback Control:",
 		"  Enter/'l'     Play selected episode (resume from position)",

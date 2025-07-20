@@ -601,6 +601,32 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 			// Delete to beginning of line
 			searchState.MoveCursorStart()
 			searchState.DeleteToEnd()
+		case tcell.KeyCtrlT:
+			// Toggle search quality filter
+			currentScore := searchState.GetMinScore()
+			var newScore int
+			var message string
+			switch currentScore {
+			case ScoreThresholdNone:
+				newScore = ScoreThresholdPermissive
+				message = "Search: Permissive mode (include marginal matches)"
+			case ScoreThresholdPermissive:
+				newScore = ScoreThresholdNormal
+				message = "Search: Normal mode (balanced)"
+			case ScoreThresholdNormal:
+				newScore = ScoreThresholdStrict
+				message = "Search: Strict mode (high quality matches only)"
+			case ScoreThresholdStrict:
+				newScore = ScoreThresholdNone
+				message = "Search: No filtering (all matches)"
+			default:
+				newScore = ScoreThresholdNormal
+				message = "Search: Normal mode (balanced)"
+			}
+			searchState.SetMinScore(newScore)
+			a.statusMessage = message
+			// Re-apply filter with new threshold
+			updateFunc()
 		case tcell.KeyRune:
 			// Check for Alt key combinations
 			if ev.Modifiers()&tcell.ModAlt != 0 {

@@ -93,7 +93,17 @@ func (v *EpisodeListView) Draw(s tcell.Screen) {
 	// Show search query if active
 	if v.searchState.query != "" {
 		searchStyle := tcell.StyleDefault.Foreground(tcell.ColorYellow)
-		searchText := fmt.Sprintf("Filter: %s (%d matches)", v.searchState.query, len(v.filteredEpisodes))
+		modeText := ""
+		switch v.searchState.GetMinScore() {
+		case ScoreThresholdStrict:
+			modeText = "[Strict] "
+		case ScoreThresholdPermissive:
+			modeText = "[Permissive] "
+		case ScoreThresholdNone:
+			modeText = "[All] "
+		// Normal mode shows no prefix
+		}
+		searchText := fmt.Sprintf("%sFilter: %s (%d matches)", modeText, v.searchState.query, len(v.filteredEpisodes))
 		drawText(s, w-len(searchText)-2, 0, searchStyle, searchText)
 	}
 
@@ -542,21 +552,22 @@ func (v *EpisodeListView) drawDescriptionWindow(s tcell.Screen, startY, width, h
 
 	// Draw description content with text wrapping
 	if description != "" {
+		// Clean up description: remove excessive whitespace and newlines
+		cleanDesc := v.cleanDescription(description)
+
 		// Check if we have match positions for this episode's description
 		var highlightPositions []int
 		if selectedEpisode != nil && v.searchState.query != "" {
-			if matchResult, ok := v.matchResults[selectedEpisode.ID]; ok {
-				// Only use positions if the match was in the description (not title)
-				titleResult := v.searchState.matchWithPositions(selectedEpisode.Title)
-				if titleResult.Score < 0 {
-					// Title didn't match, so the match must be in description
-					highlightPositions = matchResult.Positions
+			// Re-match against the cleaned description to get correct positions
+			titleMatches, _, _ := v.searchState.MatchEpisodeWithPositions(selectedEpisode.Title, "")
+			if !titleMatches {
+				// Title didn't match, so check the cleaned description
+				_, _, descResult := v.searchState.MatchEpisodeWithPositions("", cleanDesc)
+				if descResult.Score >= 0 {
+					highlightPositions = descResult.Positions
 				}
 			}
 		}
-
-		// Clean up description: remove excessive whitespace and newlines
-		cleanDesc := v.cleanDescription(description)
 
 		// Wrap text to fit width with padding
 		contentWidth := width - 2 // Leave 1 char padding on each side
@@ -618,7 +629,9 @@ func (v *EpisodeListView) wrapText(text string, width int) []string {
 
 	for _, word := range words {
 		// Check if adding this word would exceed the width
-		if currentLine.Len() > 0 && currentLine.Len()+1+len(word) > width {
+		currentLineRuneCount := len([]rune(currentLine.String()))
+		wordRuneCount := len([]rune(word))
+		if currentLineRuneCount > 0 && currentLineRuneCount+1+wordRuneCount > width {
 			// Start a new line
 			lines = append(lines, currentLine.String())
 			currentLine.Reset()
@@ -631,7 +644,7 @@ func (v *EpisodeListView) wrapText(text string, width int) []string {
 		currentLine.WriteString(word)
 
 		// Handle very long words that exceed width
-		if currentLine.Len() > width {
+		if len([]rune(currentLine.String())) > width {
 			lines = append(lines, currentLine.String())
 			currentLine.Reset()
 		}
@@ -683,14 +696,28 @@ func (v *EpisodeListView) wrapTextWithHighlights(text string, width int, highlig
 	var currentLine strings.Builder
 	var currentPositions []int
 
-	// Find word positions in the cleaned text
+	// Find word positions in the cleaned text (as rune positions)
 	wordPositions := make([]int, len(words))
-	searchPos := 0
+	runePos := 0
+	cleanedRunes := []rune(cleanedText)
+	
 	for i, word := range words {
-		idx := strings.Index(cleanedText[searchPos:], word)
-		if idx >= 0 {
-			wordPositions[i] = searchPos + idx
-			searchPos = searchPos + idx + len(word)
+		// Find the word starting from current position
+		wordRunes := []rune(word)
+		found := false
+		
+		for j := runePos; j <= len(cleanedRunes)-len(wordRunes); j++ {
+			if string(cleanedRunes[j:j+len(wordRunes)]) == word {
+				wordPositions[i] = j
+				runePos = j + len(wordRunes)
+				found = true
+				break
+			}
+		}
+		
+		if !found {
+			// Shouldn't happen with properly split words
+			wordPositions[i] = runePos
 		}
 	}
 
@@ -698,7 +725,9 @@ func (v *EpisodeListView) wrapTextWithHighlights(text string, width int, highlig
 		wordStartPos := wordPositions[wordIdx]
 		
 		// Check if adding this word would exceed the width
-		if currentLine.Len() > 0 && currentLine.Len()+1+len(word) > width {
+		currentLineRuneCount := len([]rune(currentLine.String()))
+		wordRuneCount := len([]rune(word))
+		if currentLineRuneCount > 0 && currentLineRuneCount+1+wordRuneCount > width {
 			// Start a new line
 			lines = append(lines, lineWithHighlights{
 				text:      currentLine.String(),
@@ -709,7 +738,7 @@ func (v *EpisodeListView) wrapTextWithHighlights(text string, width int, highlig
 		}
 
 		// Add space before word (if not first word)
-		lineOffset := currentLine.Len()
+		lineOffset := len([]rune(currentLine.String()))
 		if currentLine.Len() > 0 {
 			currentLine.WriteString(" ")
 			lineOffset++
@@ -719,7 +748,8 @@ func (v *EpisodeListView) wrapTextWithHighlights(text string, width int, highlig
 		currentLine.WriteString(word)
 
 		// Map highlight positions for this word
-		for i := 0; i < len(word); i++ {
+		wordRunes := []rune(word)
+		for i := 0; i < len(wordRunes); i++ {
 			origPos := wordStartPos + i
 			if highlightMap[origPos] {
 				currentPositions = append(currentPositions, lineOffset+i)
@@ -727,7 +757,7 @@ func (v *EpisodeListView) wrapTextWithHighlights(text string, width int, highlig
 		}
 
 		// Handle very long words that exceed width
-		if currentLine.Len() > width {
+		if len([]rune(currentLine.String())) > width {
 			lines = append(lines, lineWithHighlights{
 				text:      currentLine.String(),
 				positions: currentPositions,
@@ -756,22 +786,27 @@ func (v *EpisodeListView) drawLineWithHighlights(s tcell.Screen, x, y, maxWidth 
 		highlightMap[pos] = true
 	}
 
+	// Convert to runes for proper positioning
+	runes := []rune(line.text)
+	
 	// Draw each character with appropriate style
-	for i, r := range line.text {
-		if i >= maxWidth {
+	screenPos := 0
+	for runeIdx, r := range runes {
+		if screenPos >= maxWidth {
 			break
 		}
 		
 		charStyle := style
-		if highlightMap[i] {
+		if highlightMap[runeIdx] {
 			charStyle = highlightStyle
 		}
 		
-		s.SetContent(x+i, y, r, nil, charStyle)
+		s.SetContent(x+screenPos, y, r, nil, charStyle)
+		screenPos++
 	}
 	
 	// Pad the rest of the line
-	for i := len(line.text); i < maxWidth; i++ {
+	for i := screenPos; i < maxWidth; i++ {
 		s.SetContent(x+i, y, ' ', nil, style)
 	}
 }

@@ -10,6 +10,10 @@ import (
 
 type Subscriptions struct {
 	Podcasts []*Podcast `json:"podcasts"`
+	
+	// episodeIndex is a map from episode ID to episode pointer for fast lookups
+	// This is not serialized to JSON and is rebuilt on load
+	episodeIndex map[string]*Episode `json:"-"`
 }
 
 func LoadSubscriptions() (*Subscriptions, error) {
@@ -23,7 +27,11 @@ func LoadSubscriptions() (*Subscriptions, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return &Subscriptions{Podcasts: []*Podcast{}}, nil
+			subs := &Subscriptions{
+				Podcasts: []*Podcast{},
+				episodeIndex: make(map[string]*Episode),
+			}
+			return subs, nil
 		}
 		return nil, err
 	}
@@ -32,6 +40,9 @@ func LoadSubscriptions() (*Subscriptions, error) {
 	if err := json.Unmarshal(data, &subs); err != nil {
 		return nil, err
 	}
+	
+	// Build the episode index
+	subs.buildIndex()
 	
 	// Convert any missing descriptions
 	if subs.ConvertMissingDescriptions() {
@@ -100,13 +111,57 @@ func (s *Subscriptions) Add(podcast *Podcast) {
 		}
 	}
 	s.Podcasts = append(s.Podcasts, podcast)
+	
+	// Add episodes to index
+	if s.episodeIndex == nil {
+		s.episodeIndex = make(map[string]*Episode)
+	}
+	for _, episode := range podcast.Episodes {
+		if episode.ID != "" {
+			s.episodeIndex[episode.ID] = episode
+		}
+	}
 }
 
 func (s *Subscriptions) Remove(url string) {
 	for i, p := range s.Podcasts {
 		if p.URL == url {
+			// Remove episodes from index before removing podcast
+			for _, episode := range p.Episodes {
+				delete(s.episodeIndex, episode.ID)
+			}
 			s.Podcasts = append(s.Podcasts[:i], s.Podcasts[i+1:]...)
 			return
 		}
+	}
+}
+
+// buildIndex rebuilds the episode index from scratch
+func (s *Subscriptions) buildIndex() {
+	s.episodeIndex = make(map[string]*Episode)
+	for _, podcast := range s.Podcasts {
+		for _, episode := range podcast.Episodes {
+			if episode.ID != "" {
+				s.episodeIndex[episode.ID] = episode
+			}
+		}
+	}
+}
+
+// GetEpisodeByID returns an episode by its ID using the index
+func (s *Subscriptions) GetEpisodeByID(episodeID string) *Episode {
+	if s.episodeIndex == nil {
+		s.buildIndex()
+	}
+	return s.episodeIndex[episodeID]
+}
+
+// UpdateEpisodeIndex updates the index when episodes are added or modified
+func (s *Subscriptions) UpdateEpisodeIndex(episode *Episode) {
+	if s.episodeIndex == nil {
+		s.episodeIndex = make(map[string]*Episode)
+	}
+	if episode.ID != "" {
+		s.episodeIndex[episode.ID] = episode
 	}
 }

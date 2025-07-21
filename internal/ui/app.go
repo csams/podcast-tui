@@ -1080,59 +1080,53 @@ func (a *App) saveEpisodePosition() {
 		if position, err := a.player.GetPosition(); err == nil {
 			log.Printf("Saving position for episode '%s': %v", a.currentEpisode.Title, position)
 			
-			// Find and update the episode in the actual subscription data
-			for _, podcast := range a.subscriptions.Podcasts {
-				for _, episode := range podcast.Episodes {
-					if episode.ID == a.currentEpisode.ID {
-						// Update the canonical episode in subscriptions
-						episode.Position = position
+			// Find and update the episode in the actual subscription data using the index
+			if episode := a.subscriptions.GetEpisodeByID(a.currentEpisode.ID); episode != nil {
+				// Update the canonical episode in subscriptions
+				episode.Position = position
+				
+				// Update duration if it's unknown or different from actual
+				if duration, err := a.player.GetDuration(); err == nil && duration > 0 {
+					// Check if duration is significantly different (more than 1 second difference)
+					durationDiff := episode.Duration - duration
+					if durationDiff < 0 {
+						durationDiff = -durationDiff
+					}
+					
+					if episode.Duration == 0 || durationDiff > time.Second {
+						log.Printf("Updating duration for episode '%s': %v -> %v", 
+							episode.Title, episode.Duration, duration)
+						episode.Duration = duration
 						
-						// Update duration if it's unknown or different from actual
-						if duration, err := a.player.GetDuration(); err == nil && duration > 0 {
-							// Check if duration is significantly different (more than 1 second difference)
-							durationDiff := episode.Duration - duration
-							if durationDiff < 0 {
-								durationDiff = -durationDiff
-							}
-							
-							if episode.Duration == 0 || durationDiff > time.Second {
-								log.Printf("Updating duration for episode '%s': %v -> %v", 
-									episode.Title, episode.Duration, duration)
-								episode.Duration = duration
-								
-								// Update the duration in the episode list directly
-								a.episodes.UpdateEpisodeDuration(episode.ID, duration)
-								
-								// Also update our local reference
-								a.currentEpisode.Duration = duration
-								
-								// Update the episode list view's reference
-								a.episodes.SetCurrentEpisode(a.currentEpisode)
-								
-								// Immediately update the UI to show the new duration
-								if a.currentView == a.episodes {
-									a.episodes.UpdateCurrentEpisodePosition(a.screen)
-									a.screen.Show()
-								}
-							}
-						}
-						
-						// Mark as played if >95% complete
-						if duration, err := a.player.GetDuration(); err == nil && duration > 0 {
-							progressPercent := float64(position) / float64(duration)
-							if progressPercent > 0.95 {
-								episode.Played = true
-							}
-						}
+						// Update the duration in the episode list directly
+						a.episodes.UpdateEpisodeDuration(episode.ID, duration)
 						
 						// Also update our local reference
-						a.currentEpisode.Position = position
-						if episode.Played {
-							a.currentEpisode.Played = true
-						}
+						a.currentEpisode.Duration = duration
 						
-						break
+						// Update the episode list view's reference
+						a.episodes.SetCurrentEpisode(a.currentEpisode)
+						
+						// Immediately update the UI to show the new duration
+						if a.currentView == a.episodes {
+							a.episodes.UpdateCurrentEpisodePosition(a.screen)
+							a.screen.Show()
+						}
 					}
+				}
+				
+				// Mark as played if >95% complete
+				if duration, err := a.player.GetDuration(); err == nil && duration > 0 {
+					progressPercent := float64(position) / float64(duration)
+					if progressPercent > 0.95 {
+						episode.Played = true
+					}
+				}
+				
+				// Also update our local reference
+				a.currentEpisode.Position = position
+				if episode.Played {
+					a.currentEpisode.Played = true
 				}
 			}
 
@@ -1187,19 +1181,8 @@ func (a *App) playEpisode(episode *models.Episode) {
 		a.saveEpisodePosition()
 	}
 
-	// Find the canonical episode in subscription data
-	var canonicalEpisode *models.Episode
-	for _, podcast := range a.subscriptions.Podcasts {
-		for _, ep := range podcast.Episodes {
-			if ep.ID == episode.ID {
-				canonicalEpisode = ep
-				break
-			}
-		}
-		if canonicalEpisode != nil {
-			break
-		}
-	}
+	// Find the canonical episode in subscription data using the index
+	canonicalEpisode := a.subscriptions.GetEpisodeByID(episode.ID)
 	
 	// Use the canonical episode if found, otherwise use the provided one
 	if canonicalEpisode != nil {
@@ -1313,14 +1296,9 @@ func (a *App) playEpisode(episode *models.Episode) {
 						log.Printf("Updating duration for episode '%s': %v -> %v", 
 							a.currentEpisode.Title, a.currentEpisode.Duration, duration)
 						
-						// Update the episode in the actual subscription data
-						for _, podcast := range a.subscriptions.Podcasts {
-							for _, ep := range podcast.Episodes {
-								if ep.ID == a.currentEpisode.ID {
-									ep.Duration = duration
-									break
-								}
-							}
+						// Update the episode in the actual subscription data using the index
+						if ep := a.subscriptions.GetEpisodeByID(a.currentEpisode.ID); ep != nil {
+							ep.Duration = duration
 						}
 						
 						a.currentEpisode.Duration = duration
@@ -1444,19 +1422,8 @@ func (a *App) restartEpisode(episode *models.Episode) {
 	a.statusMessage = "Restarting: " + episode.Title
 	a.draw() // Show status immediately
 
-	// Find the canonical episode in subscription data
-	var canonicalEpisode *models.Episode
-	for _, podcast := range a.subscriptions.Podcasts {
-		for _, ep := range podcast.Episodes {
-			if ep.ID == episode.ID {
-				canonicalEpisode = ep
-				break
-			}
-		}
-		if canonicalEpisode != nil {
-			break
-		}
-	}
+	// Find the canonical episode in subscription data using the index
+	canonicalEpisode := a.subscriptions.GetEpisodeByID(episode.ID)
 	
 	// Use the canonical episode if found, otherwise use the provided one
 	if canonicalEpisode != nil {
@@ -1864,6 +1831,11 @@ func (a *App) mergePodcastData(existing *models.Podcast, updated *models.Podcast
 
 	// Replace episodes with merged list
 	existing.Episodes = mergedEpisodes
+	
+	// Update the episode index for all new/modified episodes
+	for _, episode := range mergedEpisodes {
+		a.subscriptions.UpdateEpisodeIndex(episode)
+	}
 }
 
 // startPositionTicker starts a ticker that updates the UI periodically when playing
@@ -1901,27 +1873,21 @@ func (a *App) stopPositionTicker() {
 func (a *App) updateCurrentPosition() {
 	if a.currentEpisode != nil && a.player.GetState() != player.StateStopped {
 		if position, err := a.player.GetPosition(); err == nil {
-			// Update position in the actual subscription data
-			for _, podcast := range a.subscriptions.Podcasts {
-				for _, episode := range podcast.Episodes {
-					if episode.ID == a.currentEpisode.ID {
-						episode.Position = position
-						
-						// Also check and update duration if it has changed
-						if duration, err := a.player.GetDuration(); err == nil && duration > 0 {
-							if episode.Duration != duration {
-								log.Printf("Updating duration in updateCurrentPosition: %v -> %v", episode.Duration, duration)
-								episode.Duration = duration
-								// Update the duration in the episode list directly
-								a.episodes.UpdateEpisodeDuration(episode.ID, duration)
-								// Also update our local reference
-								a.currentEpisode.Duration = duration
-								// Update the episode list view's reference
-								a.episodes.SetCurrentEpisode(a.currentEpisode)
-							}
-						}
-						
-						break
+			// Update position in the actual subscription data using the index
+			if episode := a.subscriptions.GetEpisodeByID(a.currentEpisode.ID); episode != nil {
+				episode.Position = position
+				
+				// Also check and update duration if it has changed
+				if duration, err := a.player.GetDuration(); err == nil && duration > 0 {
+					if episode.Duration != duration {
+						log.Printf("Updating duration in updateCurrentPosition: %v -> %v", episode.Duration, duration)
+						episode.Duration = duration
+						// Update the duration in the episode list directly
+						a.episodes.UpdateEpisodeDuration(episode.ID, duration)
+						// Also update our local reference
+						a.currentEpisode.Duration = duration
+						// Update the episode list view's reference
+						a.episodes.SetCurrentEpisode(a.currentEpisode)
 					}
 				}
 			}

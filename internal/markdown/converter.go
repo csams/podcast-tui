@@ -141,7 +141,12 @@ func (mc *MarkdownConverter) processHTML(text string, pm *PositionMap) (string, 
 		if len(tagSubmatches) >= 3 {
 			isClosing := tagSubmatches[1] == "/"
 			tagContent := tagSubmatches[2]
-			tagName := strings.ToLower(strings.Fields(tagContent)[0])
+			// Extract tag name, handling self-closing tags like <br/> or <br />
+			tagParts := strings.Fields(tagContent)
+			if len(tagParts) == 0 {
+				continue
+			}
+			tagName := strings.ToLower(strings.TrimRight(tagParts[0], "/"))
 			
 			replacement := ""
 			switch tagName {

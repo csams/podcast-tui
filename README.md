@@ -4,18 +4,22 @@ A terminal-based podcast manager with vim-style keybindings, built with Go and t
 
 ## Features
 
-- Vim-style navigation
+- Vim-style navigation with familiar keybindings
 - RSS feed parsing and subscription management
 - Audio playback with mpv backend
 - Episode download management with progress tracking
 - Persistent storage of subscriptions and playback positions
-- Terminal-based UI using ncurses (via tcell)
+- Terminal-based UI using tcell library
 - Organized download storage with podcast subdirectories
 - Enhanced episode display with publication dates, duration, and listening progress
 - Episode count display for each podcast
 - Ability to restart episodes from the beginning or resume from saved position
 - Real-time progress indicator when refreshing podcast feeds
 - Episode description window showing details of the currently selected episode
+- Markdown/HTML to terminal text conversion for better description readability
+- Fuzzy search with highlighting for both podcasts and episodes
+- Real-time playback position updates in the episode list
+- Automatic position saving and resume functionality
 
 ## Requirements
 
@@ -32,24 +36,39 @@ A terminal-based podcast manager with vim-style keybindings, built with Go and t
 
 ### Navigation
 - `j` / `k` - Move down/up in lists
+- `Ctrl+F` / `Ctrl+B` - Page down/up in lists
 - `h` / `l` - Switch between podcast and episode views
 - `Enter` - Select item (same as `l` when on podcast, plays episode when on episode)
 - `g` - Go to top of list
 - `G` - Go to bottom of list
+- `Alt+j` / `Alt+k` - Scroll down/up in the description window (episode view)
 
-**Episode View Layout**: When viewing episodes, the screen is split with the episode list on top and a description window at the bottom showing details of the currently selected episode.
+**Episode View Layout**: When viewing episodes, the screen is split with the episode list on top and a description window at the bottom showing details of the currently selected episode. The description window automatically converts markdown/HTML to readable terminal text.
+
+**Episode Status Indicators**:
+- `▶` - Currently playing episode (highlighted with green text)
+- `⏸` - Currently paused episode (highlighted with yellow text)
+- `✔` - Downloaded episode
+- `[⬇50%]` - Downloading (with progress percentage)
+- `[⏸]` - Download queued
+- `[✗]` - Download failed
+- Position format: `15:30/45:00` (current position/total duration)
 
 ### Playback Control
 - `Space` - Play/pause current episode
 - `Enter` - Play selected episode (resume from saved position)
+- `s` - Stop playback
 - `R` - Restart episode from beginning (reset position to 0:00)
 - `f` - Seek forward 30 seconds
 - `b` - Seek backward 30 seconds
 - `Left` / `Right` - Seek backward/forward 10 seconds
+- `0`-`9` - Seek to 0%-90% of episode duration
 - `m` - Mute/unmute
 - `<` / `>` - Decrease/increase playback speed
 - `=` - Reset to normal speed (1.0x)
 - `Up` / `Down` - Increase/decrease volume by 5%
+
+**Note**: Playback positions are automatically saved and updated in real-time. When you play an episode, it will resume from where you left off.
 
 ### Episode Downloads
 - `d` - Download selected episode
@@ -60,8 +79,26 @@ A terminal-based podcast manager with vim-style keybindings, built with Go and t
 - `x` - Delete selected podcast
 - `r` - Refresh all podcast feeds (with progress indicator)
 
+### Search
+- `/` - Enter search mode (fuzzy search with highlighting)
+- `Ctrl+T` - Toggle search quality filter (Normal/Strict/Permissive/All)
+- `Enter` / `Esc` - Exit search mode (filter stays active)
+- Empty search clears filter and shows all items
+
+**Search Mode Editing** (Emacs-style keybindings):
+- `Ctrl+A` / `Home` - Move cursor to beginning
+- `Ctrl+E` / `End` - Move cursor to end
+- `Ctrl+F` / `Right` - Move cursor forward one character
+- `Ctrl+B` / `Left` - Move cursor backward one character
+- `Alt+F` - Move cursor forward one word
+- `Alt+B` - Move cursor backward one word
+- `Ctrl+K` - Delete from cursor to end
+- `Ctrl+U` - Delete entire search query
+- `Ctrl+W` - Delete word before cursor
+- `Alt+D` - Delete word after cursor
+- `Ctrl+D` / `Delete` - Delete character at cursor
+
 ### Other
-- `/` - Enter search mode
 - `:` - Enter command mode
 - `?` - Show help dialog
 - `Esc` - Return to normal mode / close dialogs
@@ -186,6 +223,7 @@ podcast-tui/
 │   ├── models/          # Data structures and subscription management
 │   ├── player/          # Audio playback with mpv backend
 │   ├── feed/            # RSS feed parsing
-│   └── download/        # Episode download management with progress tracking
+│   ├── download/        # Episode download management with progress tracking
+│   └── markdown/        # Markdown/HTML to terminal text conversion
 └── go.mod
 ```

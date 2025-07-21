@@ -25,7 +25,7 @@ type Episode struct {
 	Title        string        `json:"title"`
 	Description  string        `json:"description"`
 	URL          string        `json:"url"`
-	Duration     time.Duration `json:"duration,omitempty"`
+	Duration     time.Duration `json:"duration,omitempty"` // Discovered durations take precedence over RSS feed data
 	PublishDate  time.Time     `json:"publishDate"`
 	Played       bool          `json:"played"`
 	Position     time.Duration `json:"position"`

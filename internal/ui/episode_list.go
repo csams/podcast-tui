@@ -9,6 +9,7 @@ import (
 	"github.com/csams/podcast-tui/internal/download"
 	"github.com/csams/podcast-tui/internal/markdown"
 	"github.com/csams/podcast-tui/internal/models"
+	"github.com/csams/podcast-tui/internal/player"
 	"github.com/gdamore/tcell/v2"
 )
 
@@ -19,6 +20,7 @@ type EpisodeListView struct {
 	currentPodcast  *models.Podcast
 	downloadManager *download.Manager
 	currentEpisode  *models.Episode
+	player          *player.Player
 	selectedIdx     int
 	scrollOffset    int
 	screenHeight    int
@@ -62,6 +64,88 @@ func (v *EpisodeListView) SetDownloadManager(dm *download.Manager) {
 
 func (v *EpisodeListView) SetCurrentEpisode(episode *models.Episode) {
 	v.currentEpisode = episode
+}
+
+func (v *EpisodeListView) SetPlayer(p *player.Player) {
+	v.player = p
+}
+
+// UpdateEpisodeDuration finds and updates the duration of a specific episode in the list
+func (v *EpisodeListView) UpdateEpisodeDuration(episodeID string, newDuration time.Duration) {
+	// Update in main episodes list
+	for _, ep := range v.episodes {
+		if ep.ID == episodeID {
+			ep.Duration = newDuration
+			break
+		}
+	}
+	
+	// Also update in filtered episodes if active
+	for _, ep := range v.filteredEpisodes {
+		if ep.ID == episodeID {
+			ep.Duration = newDuration
+			break
+		}
+	}
+}
+
+// UpdateCurrentEpisodePosition updates only the position display for the currently playing episode
+func (v *EpisodeListView) UpdateCurrentEpisodePosition(s tcell.Screen) {
+	if v.currentEpisode == nil {
+		return
+	}
+
+	// Find the episode in the displayed list
+	episodes := v.getActiveEpisodes()
+	w, _ := s.Size()
+	
+	// Calculate visible area (same as in Draw)
+	visibleHeight := v.screenHeight - 17 // Account for headers and description window
+	
+	// Find the episode's index and check if it's visible
+	for i := 0; i < visibleHeight && i+v.scrollOffset < len(episodes); i++ {
+		idx := i + v.scrollOffset
+		episode := episodes[idx]
+		
+		if episode.ID == v.currentEpisode.ID {
+			// Update the episode's position and duration from currentEpisode
+			episode.Position = v.currentEpisode.Position
+			episode.Duration = v.currentEpisode.Duration
+			
+			// Calculate column positions
+			columns := v.calculateColumnWidths(w)
+			
+			// Calculate x position for the position column
+			x := 1 // Start with left padding
+			x += columns.status + 1  // Status column + padding
+			x += columns.title + 1   // Title column + padding
+			x += columns.date + 1    // Date column + padding
+			
+			// Calculate y position (row in the list)
+			y := i + 3 // Account for header rows
+			
+			// Determine the style for this row
+			style := tcell.StyleDefault
+			if idx == v.selectedIdx {
+				style = style.Background(ColorSelection).Foreground(ColorBright)
+			} else if v.player != nil {
+				// Apply current episode highlighting
+				if v.player.GetState() == player.StatePlaying {
+					style = style.Background(ColorBlue7).Foreground(ColorGreen)
+				} else if v.player.GetState() == player.StatePaused {
+					style = style.Background(ColorBlue7).Foreground(ColorYellow)
+				}
+			}
+			
+			// Clear and redraw just the position column
+			// Now episode has the updated duration and position
+			position := v.formatListeningPosition(episode)
+			v.drawColumnText(s, x, y, columns.position, position, style)
+			
+			// We found and updated the episode, we're done
+			return
+		}
+	}
 }
 
 func (v *EpisodeListView) GetSelected() *models.Episode {
@@ -132,9 +216,15 @@ func (v *EpisodeListView) Draw(s tcell.Screen) {
 		
 		if isSelected {
 			style = style.Background(ColorSelection).Foreground(ColorBright)
-		} else if isCurrentEpisode {
-			// Highlight currently playing/paused episode with a different color
-			style = style.Background(ColorGreen).Foreground(ColorBgDark)
+		} else if isCurrentEpisode && v.player != nil {
+			// Highlight currently playing/paused episode
+			if v.player.GetState() == player.StatePlaying {
+				// Playing: Use a subtle green-tinted background
+				style = style.Background(ColorBlue7).Foreground(ColorGreen)
+			} else if v.player.GetState() == player.StatePaused {
+				// Paused: Use a subtle yellow-tinted background
+				style = style.Background(ColorBlue7).Foreground(ColorYellow)
+			}
 		}
 
 		// Draw episode row in table format
@@ -546,17 +636,20 @@ func (v *EpisodeListView) drawColumnTextWithHighlight(s tcell.Screen, x, y, widt
 	}
 }
 
-// formatPublishDate formats a publish date for display
+// formatPublishDate formats a publish date for display in local time
 func (v *EpisodeListView) formatPublishDate(publishDate time.Time) string {
 	if publishDate.IsZero() {
 		return "—"
 	}
 
+	// Convert to local time
+	localDate := publishDate.Local()
 	now := time.Now()
-	if publishDate.Year() == now.Year() {
-		return publishDate.Format("Jan 02")
+	
+	if localDate.Year() == now.Year() {
+		return localDate.Format("Jan 02")
 	}
-	return publishDate.Format("2006-01-02")
+	return localDate.Format("2006-01-02")
 }
 
 // formatListeningPosition formats the listening position with total duration context
@@ -889,6 +982,15 @@ func (v *EpisodeListView) drawLineWithHighlights(s tcell.Screen, x, y, maxWidth 
 
 // getDownloadIndicator returns the appropriate download status indicator for an episode
 func (v *EpisodeListView) getDownloadIndicator(episode *models.Episode) string {
+	// First check if this is the currently playing/paused episode
+	if v.currentEpisode != nil && episode.ID == v.currentEpisode.ID && v.player != nil {
+		if v.player.GetState() == player.StatePlaying {
+			return "▶" // Playing indicator
+		} else if v.player.GetState() == player.StatePaused {
+			return "⏸" // Paused indicator
+		}
+	}
+	
 	if v.downloadManager == nil {
 		return ""
 	}

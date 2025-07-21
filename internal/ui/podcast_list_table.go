@@ -247,10 +247,11 @@ func (v *PodcastListView) getLatestEpisodeDate(podcast *models.Podcast) string {
 		return "—"
 	}
 
-	// Format date
+	// Convert to local time and format date
+	localDate := latestDate.Local()
 	now := time.Now()
-	if latestDate.Year() == now.Year() {
-		return latestDate.Format("Jan 02")
+	if localDate.Year() == now.Year() {
+		return localDate.Format("Jan 02")
 	}
-	return latestDate.Format("2006-01-02")
+	return localDate.Format("2006-01-02")
 }

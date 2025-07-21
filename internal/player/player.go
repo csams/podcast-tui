@@ -512,6 +512,26 @@ func (p *Player) Seek(seconds int) error {
 	return nil
 }
 
+// SeekAbsolute seeks to an absolute position in seconds
+func (p *Player) SeekAbsolute(seconds int) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.state == StateStopped {
+		return nil
+	}
+
+	cmd := mpvCommand{
+		Command: []interface{}{"seek", seconds, "absolute"},
+	}
+
+	if _, err := p.sendCommand(cmd); err != nil {
+		return fmt.Errorf("failed to seek: %w", err)
+	}
+
+	return nil
+}
+
 // Volume control methods
 func (p *Player) GetVolume() (int, error) {
 	p.mu.Lock()

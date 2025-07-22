@@ -77,7 +77,7 @@ A terminal-based podcast manager with vim-style keybindings, built with Go and t
 ### Podcast Management
 - `a` - Add new podcast (enters command mode)
 - `x` - Delete selected podcast
-- `r` - Refresh all podcast feeds (with progress indicator)
+- `r` - Refresh feeds (all feeds in podcast list, current podcast in episode list)
 
 ### Search
 - `/` - Enter search mode (fuzzy search with highlighting)

@@ -287,7 +287,7 @@ func (h *HelpDialog) getHelpContent() []string {
 		"Podcast Management:",
 		"  a             Add new podcast (enters command mode)",
 		"  x             Delete selected podcast (with confirmation)",
-		"  r             Refresh all feeds (shows progress indicator)",
+		"  r             Refresh feeds (all in podcast list, current in episode list)",
 		"",
 		"Other:",
 		"  :             Enter command mode",

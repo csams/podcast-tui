@@ -440,12 +440,21 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				}
 			case 'r':
 				// Refresh feeds
-				totalPodcasts := len(a.subscriptions.Podcasts)
-				if totalPodcasts == 0 {
-					a.statusMessage = "No podcasts to refresh"
+				if a.currentView == a.episodes {
+					// In episode list view, refresh only the current podcast
+					if podcast := a.episodes.GetCurrentPodcast(); podcast != nil {
+						a.statusMessage = fmt.Sprintf("Refreshing %s...", podcast.Title)
+						go a.refreshSinglePodcast(podcast)
+					}
 				} else {
-					a.statusMessage = fmt.Sprintf("Starting refresh of %d podcasts...", totalPodcasts)
-					go a.refreshFeeds()
+					// In podcast list view, refresh all feeds
+					totalPodcasts := len(a.subscriptions.Podcasts)
+					if totalPodcasts == 0 {
+						a.statusMessage = "No podcasts to refresh"
+					} else {
+						a.statusMessage = fmt.Sprintf("Starting refresh of %d podcasts...", totalPodcasts)
+						go a.refreshFeeds()
+					}
 				}
 				return true
 			case 's':
@@ -1072,6 +1081,33 @@ func (a *App) refreshFeeds() {
 	}
 	
 	// Update UI to show refreshed episode counts
+	a.draw()
+}
+
+// refreshSinglePodcast refreshes just one podcast's feed
+func (a *App) refreshSinglePodcast(podcast *models.Podcast) {
+	// Parse the feed
+	updated, err := feed.ParseFeed(podcast.URL)
+	if err != nil {
+		log.Printf("Failed to refresh %s: %v", podcast.Title, err)
+		a.statusMessage = fmt.Sprintf("Failed to refresh %s: %v", podcast.Title, err)
+		a.draw()
+		return
+	}
+	
+	// Merge the updated data
+	a.mergePodcastData(podcast, updated)
+	
+	// Save subscriptions
+	if err := a.subscriptions.Save(); err != nil {
+		log.Printf("Failed to save subscriptions: %v", err)
+	}
+	
+	// Update the episode list view with the refreshed podcast
+	a.episodes.SetPodcast(podcast)
+	
+	// Update status and redraw
+	a.statusMessage = fmt.Sprintf("%s refreshed successfully", podcast.Title)
 	a.draw()
 }
 

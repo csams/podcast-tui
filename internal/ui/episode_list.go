@@ -13,43 +13,177 @@ import (
 	"github.com/gdamore/tcell/v2"
 )
 
-type EpisodeListView struct {
-	episodes        []*models.Episode
-	filteredEpisodes []*models.Episode  // Episodes after search filtering
-	matchResults    map[string]EpisodeMatchResult  // Match results for highlighting
-	currentPodcast  *models.Podcast
+// EpisodeTableRow adapts an episode to the TableRow interface
+type EpisodeTableRow struct {
+	episode         *models.Episode
+	matchResult     *EpisodeMatchResult
 	downloadManager *download.Manager
 	currentEpisode  *models.Episode
 	player          *player.Player
-	selectedIdx     int
-	scrollOffset    int
-	screenHeight    int
-	searchState     *SearchState
-	descScrollOffset int  // Scroll offset for description window
+	podcastTitle    string
 }
 
-// EpisodeMatchResult stores match result and which field matched
-type EpisodeMatchResult struct {
-	MatchResult
-	MatchField string  // "title" or "description"
+func (r *EpisodeTableRow) GetCell(columnIndex int) string {
+	switch columnIndex {
+	case 0: // Status/Local column
+		return r.getDownloadIndicator()
+	case 1: // Title
+		return r.episode.Title
+	case 2: // Date
+		return r.formatPublishDate()
+	case 3: // Position
+		return r.formatListeningPosition()
+	default:
+		return ""
+	}
+}
+
+func (r *EpisodeTableRow) GetCellStyle(columnIndex int, selected bool) *tcell.Style {
+	// Check if this is the currently playing/paused episode
+	if r.currentEpisode != nil && r.episode.ID == r.currentEpisode.ID && r.player != nil {
+		if !selected {
+			if r.player.GetState() == player.StatePlaying {
+				style := tcell.StyleDefault.Background(ColorBlue7).Foreground(ColorGreen)
+				return &style
+			} else if r.player.GetState() == player.StatePaused {
+				style := tcell.StyleDefault.Background(ColorBlue7).Foreground(ColorYellow)
+				return &style
+			}
+		}
+	}
+	return nil
+}
+
+func (r *EpisodeTableRow) GetHighlightPositions(columnIndex int) []int {
+	if r.matchResult == nil {
+		return nil
+	}
+	
+	switch columnIndex {
+	case 1: // Title
+		if r.matchResult.MatchField == "title" {
+			return r.matchResult.Positions
+		}
+	}
+	return nil
+}
+
+func (r *EpisodeTableRow) getDownloadIndicator() string {
+	// Playing/paused indicators take precedence
+	if r.currentEpisode != nil && r.episode.ID == r.currentEpisode.ID && r.player != nil {
+		if r.player.GetState() == player.StatePlaying {
+			return "▶"
+		} else if r.player.GetState() == player.StatePaused {
+			return "⏸"
+		}
+	}
+	
+	if r.downloadManager == nil {
+		return ""
+	}
+
+	// Check if downloaded
+	if r.downloadManager.IsEpisodeDownloaded(r.episode, r.podcastTitle) {
+		return "✔"
+	}
+
+	// Check download status
+	if r.downloadManager.IsDownloading(r.episode.ID) {
+		if progress, exists := r.downloadManager.GetDownloadProgress(r.episode.ID); exists {
+			switch progress.Status {
+			case download.StatusDownloading:
+				return fmt.Sprintf("[⬇%.0f%%]", progress.Progress*100)
+			case download.StatusQueued:
+				return "[⏸]"
+			case download.StatusFailed:
+				return "[⚠]"
+			default:
+				return "[⬇]"
+			}
+		}
+		return "[⬇]"
+	}
+
+	// Check for failed downloads
+	if progress, exists := r.downloadManager.GetDownloadProgress(r.episode.ID); exists {
+		if progress.Status == download.StatusFailed {
+			return "[⚠]"
+		}
+	}
+
+	return ""
+}
+
+func (r *EpisodeTableRow) formatPublishDate() string {
+	if r.episode.PublishDate.IsZero() {
+		return "—"
+	}
+
+	localDate := r.episode.PublishDate.Local()
+	now := time.Now()
+	
+	if localDate.Year() == now.Year() {
+		return localDate.Format("Jan 02")
+	}
+	return localDate.Format("2006-01-02")
+}
+
+func (r *EpisodeTableRow) formatListeningPosition() string {
+	position := r.episode.Position
+	duration := r.episode.Duration
+
+	if position == 0 {
+		if duration > 0 {
+			return "0:00/" + formatDuration(duration)
+		}
+		return "—"
+	}
+
+	posStr := formatDuration(position)
+	if duration > 0 {
+		return posStr + "/" + formatDuration(duration)
+	}
+
+	return posStr
+}
+
+// EpisodeListView is the episode list using the table abstraction
+type EpisodeListView struct {
+	table            *Table
+	episodes         []*models.Episode
+	filteredEpisodes []*models.Episode
+	matchResults     map[string]EpisodeMatchResult
+	currentPodcast   *models.Podcast
+	downloadManager  *download.Manager
+	currentEpisode   *models.Episode
+	player           *player.Player
+	searchState      *SearchState
+	descScrollOffset int
 }
 
 func NewEpisodeListView() *EpisodeListView {
-	return &EpisodeListView{
-		episodes:    []*models.Episode{},
-		filteredEpisodes: []*models.Episode{},
+	v := &EpisodeListView{
+		table:        NewTable(),
+		episodes:     []*models.Episode{},
 		matchResults: make(map[string]EpisodeMatchResult),
-		selectedIdx: 0,
-		searchState: NewSearchState(),
+		searchState:  NewSearchState(),
 	}
+	
+	// Configure table columns
+	v.table.SetColumns([]TableColumn{
+		{Title: "Local", Width: 9, Align: AlignLeft},              // Status/Download
+		{Title: "Title", MinWidth: 20, FlexWeight: 1.0, Align: AlignLeft}, // Title
+		{Title: "Date", Width: 10, Align: AlignLeft},              // Date
+		{Title: "Position", Width: 17, Align: AlignLeft},          // Position
+	})
+	
+	return v
 }
 
 func (v *EpisodeListView) SetPodcast(podcast *models.Podcast) {
 	// Only reset position if switching to a different podcast
 	if v.currentPodcast == nil || v.currentPodcast.URL != podcast.URL {
-		v.selectedIdx = 0
-		v.scrollOffset = 0
-		// Clear search when switching podcasts
+		v.table.SelectFirst()
 		v.searchState.Clear()
 	}
 	
@@ -64,13 +198,14 @@ func (v *EpisodeListView) SetDownloadManager(dm *download.Manager) {
 
 func (v *EpisodeListView) SetCurrentEpisode(episode *models.Episode) {
 	v.currentEpisode = episode
+	// Update table rows to reflect new current episode
+	v.updateTableRows()
 }
 
 func (v *EpisodeListView) SetPlayer(p *player.Player) {
 	v.player = p
 }
 
-// UpdateEpisodeDuration finds and updates the duration of a specific episode in the list
 func (v *EpisodeListView) UpdateEpisodeDuration(episodeID string, newDuration time.Duration) {
 	// Update in main episodes list
 	for _, ep := range v.episodes {
@@ -80,81 +215,45 @@ func (v *EpisodeListView) UpdateEpisodeDuration(episodeID string, newDuration ti
 		}
 	}
 	
-	// Also update in filtered episodes if active
+	// Also update in filtered episodes
 	for _, ep := range v.filteredEpisodes {
 		if ep.ID == episodeID {
 			ep.Duration = newDuration
 			break
 		}
 	}
+	
+	// Update table rows
+	v.updateTableRows()
 }
 
-// UpdateCurrentEpisodePosition updates only the position display for the currently playing episode
 func (v *EpisodeListView) UpdateCurrentEpisodePosition(s tcell.Screen) {
 	if v.currentEpisode == nil {
 		return
 	}
 
-	// Find the episode in the displayed list
+	// Find and update the episode's position
 	episodes := v.getActiveEpisodes()
-	w, _ := s.Size()
-	
-	// Calculate visible area (same as in Draw)
-	visibleHeight := v.screenHeight - 17 // Account for headers and description window
-	
-	// Find the episode's index and check if it's visible
-	for i := 0; i < visibleHeight && i+v.scrollOffset < len(episodes); i++ {
-		idx := i + v.scrollOffset
-		episode := episodes[idx]
-		
+	for _, episode := range episodes {
 		if episode.ID == v.currentEpisode.ID {
-			// Update the episode's position and duration from currentEpisode
 			episode.Position = v.currentEpisode.Position
 			episode.Duration = v.currentEpisode.Duration
-			
-			// Calculate column positions
-			columns := v.calculateColumnWidths(w)
-			
-			// Calculate x position for the position column
-			x := 1 // Start with left padding
-			x += columns.status + 1  // Status column + padding
-			x += columns.title + 1   // Title column + padding
-			x += columns.date + 1    // Date column + padding
-			
-			// Calculate y position (row in the list)
-			y := i + 3 // Account for header rows
-			
-			// Determine the style for this row
-			style := tcell.StyleDefault
-			if idx == v.selectedIdx {
-				style = style.Background(ColorSelection).Foreground(ColorBright)
-			} else if v.player != nil {
-				// Apply current episode highlighting
-				if v.player.GetState() == player.StatePlaying {
-					style = style.Background(ColorBlue7).Foreground(ColorGreen)
-				} else if v.player.GetState() == player.StatePaused {
-					style = style.Background(ColorBlue7).Foreground(ColorYellow)
-				}
-			}
-			
-			// Clear and redraw just the position column
-			// Now episode has the updated duration and position
-			position := v.formatListeningPosition(episode)
-			v.drawColumnText(s, x, y, columns.position, position, style)
-			
-			// We found and updated the episode, we're done
-			return
+			break
 		}
 	}
+	
+	// Redraw just the table (this is more efficient than full screen redraw)
+	v.table.Draw(s)
 }
 
 func (v *EpisodeListView) GetSelected() *models.Episode {
-	// Use filtered episodes if filter is active
-	episodes := v.getActiveEpisodes()
-	if v.selectedIdx < 0 || v.selectedIdx >= len(episodes) {
-		return nil
+	row := v.table.GetSelectedRow()
+	if row != nil {
+		if episodeRow, ok := row.(*EpisodeTableRow); ok {
+			return episodeRow.episode
+		}
 	}
-	return episodes[v.selectedIdx]
+	return nil
 }
 
 func (v *EpisodeListView) GetCurrentPodcast() *models.Podcast {
@@ -163,17 +262,16 @@ func (v *EpisodeListView) GetCurrentPodcast() *models.Podcast {
 
 func (v *EpisodeListView) Draw(s tcell.Screen) {
 	w, h := s.Size()
-	v.screenHeight = h
-
-	// Calculate space allocation: reserve bottom area for description
-	descriptionHeight := 15 // Reserve 15 lines for description (including borders)
+	
+	// Calculate space allocation
+	descriptionHeight := 15
 	episodeListHeight := h - descriptionHeight
-	if episodeListHeight < 5 { // Minimum space for episode list
+	if episodeListHeight < 5 {
 		episodeListHeight = h - 2
 		descriptionHeight = 2
 	}
-
-	// Draw episode list header with podcast name
+	
+	// Draw header with podcast name
 	headerText := "Episodes"
 	if v.currentPodcast != nil && v.currentPodcast.Title != "" {
 		headerText = fmt.Sprintf("Episodes - %s", v.currentPodcast.Title)
@@ -182,10 +280,7 @@ func (v *EpisodeListView) Draw(s tcell.Screen) {
 	for x := 0; x < w; x++ {
 		s.SetContent(x, 1, '─', nil, tcell.StyleDefault)
 	}
-
-	// Draw table header
-	v.drawTableHeader(s, 2, w)
-
+	
 	// Show search query if active
 	if v.searchState.query != "" {
 		searchStyle := tcell.StyleDefault.Foreground(ColorHighlight)
@@ -197,55 +292,23 @@ func (v *EpisodeListView) Draw(s tcell.Screen) {
 			modeText = "[Permissive] "
 		case ScoreThresholdNone:
 			modeText = "[All] "
-		// Normal mode shows no prefix
 		}
 		searchText := fmt.Sprintf("%sFilter: %s (%d matches)", modeText, v.searchState.query, len(v.filteredEpisodes))
 		drawText(s, w-len(searchText)-2, 0, searchStyle, searchText)
 	}
-
-	// Draw episode list as table
-	episodes := v.getActiveEpisodes()
-	visibleHeight := episodeListHeight - 4 // Account for header row
-	for i := 0; i < visibleHeight && i+v.scrollOffset < len(episodes); i++ {
-		idx := i + v.scrollOffset
-		episode := episodes[idx]
-
-		style := tcell.StyleDefault
-		isSelected := idx == v.selectedIdx
-		isCurrentEpisode := v.currentEpisode != nil && episode.ID == v.currentEpisode.ID
-		
-		if isSelected {
-			style = style.Background(ColorSelection).Foreground(ColorBright)
-		} else if isCurrentEpisode && v.player != nil {
-			// Highlight currently playing/paused episode
-			if v.player.GetState() == player.StatePlaying {
-				// Playing: Use a subtle green-tinted background
-				style = style.Background(ColorBlue7).Foreground(ColorGreen)
-			} else if v.player.GetState() == player.StatePaused {
-				// Paused: Use a subtle yellow-tinted background
-				style = style.Background(ColorBlue7).Foreground(ColorYellow)
-			}
-		}
-
-		// Draw episode row in table format
-		v.drawEpisodeRow(s, i+3, w, episode, isSelected, style)
-	}
 	
-	// Show scroll indicator if there are more items than visible
-	if len(episodes) > visibleHeight {
+	// Configure and draw table
+	v.table.SetPosition(0, 2)
+	v.table.SetSize(w, episodeListHeight - 2)
+	v.table.Draw(s)
+	
+	// Show scroll indicator
+	if first, last, total := v.table.GetScrollInfo(); total > last-first+1 {
 		scrollStyle := tcell.StyleDefault.Foreground(ColorDimmed)
-		// Calculate visible range
-		firstVisible := v.scrollOffset + 1
-		lastVisible := v.scrollOffset + visibleHeight
-		if lastVisible > len(episodes) {
-			lastVisible = len(episodes)
-		}
-		scrollInfo := fmt.Sprintf("[%d-%d/%d]", firstVisible, lastVisible, len(episodes))
+		scrollInfo := fmt.Sprintf("[%d-%d/%d]", first, last, total)
 		
-		// Position in the title bar, but not overlapping with search info or header text
 		scrollX := len(headerText) + 2
 		if v.searchState.query != "" {
-			// If search is active, make sure we don't overlap
 			searchTextLen := len(fmt.Sprintf("Filter: %s (%d matches)", v.searchState.query, len(v.filteredEpisodes))) + 10
 			maxScrollX := w - searchTextLen - 2 - len(scrollInfo)
 			if scrollX > maxScrollX {
@@ -254,8 +317,8 @@ func (v *EpisodeListView) Draw(s tcell.Screen) {
 		}
 		drawText(s, scrollX, 0, scrollStyle, scrollInfo)
 	}
-
-	// Draw description window at the bottom
+	
+	// Draw description window
 	if descriptionHeight > 2 {
 		v.drawDescriptionWindow(s, episodeListHeight, w, descriptionHeight)
 	}
@@ -268,11 +331,9 @@ func (v *EpisodeListView) HandleKey(ev *tcell.EventKey) bool {
 		if ev.Modifiers()&tcell.ModAlt != 0 {
 			switch ev.Rune() {
 			case 'j':
-				// Scroll description down
 				v.descScrollOffset++
 				return true
 			case 'k':
-				// Scroll description up
 				if v.descScrollOffset > 0 {
 					v.descScrollOffset--
 				}
@@ -282,401 +343,133 @@ func (v *EpisodeListView) HandleKey(ev *tcell.EventKey) bool {
 		
 		switch ev.Rune() {
 		case 'j':
-			episodes := v.getActiveEpisodes()
-			if v.selectedIdx < len(episodes)-1 {
-				v.selectedIdx++
-				v.ensureVisible()
-				v.descScrollOffset = 0  // Reset description scroll when changing episodes
+			if v.table.SelectNext() {
+				v.descScrollOffset = 0
 				return true
 			}
 		case 'k':
-			if v.selectedIdx > 0 {
-				v.selectedIdx--
-				v.ensureVisible()
-				v.descScrollOffset = 0  // Reset description scroll when changing episodes
+			if v.table.SelectPrevious() {
+				v.descScrollOffset = 0
 				return true
 			}
 		case 'g':
-			v.selectedIdx = 0
-			v.scrollOffset = 0
-			v.descScrollOffset = 0  // Reset description scroll
+			v.table.SelectFirst()
+			v.descScrollOffset = 0
 			return true
 		case 'G':
-			episodes := v.getActiveEpisodes()
-			v.selectedIdx = len(episodes) - 1
-			v.ensureVisible()
-			v.descScrollOffset = 0  // Reset description scroll
+			v.table.SelectLast()
+			v.descScrollOffset = 0
 			return true
 		}
 	}
 	return false
 }
 
-func (v *EpisodeListView) ensureVisible() {
-	episodes := v.getActiveEpisodes()
-	if len(episodes) == 0 || v.screenHeight == 0 {
-		return
-	}
-
-	// Account for description window (15 lines) and headers
-	descriptionHeight := 15
-	episodeListHeight := v.screenHeight - descriptionHeight
-	if episodeListHeight < 5 { // Minimum space for episode list
-		episodeListHeight = v.screenHeight - 2
-	}
-
-	// Account for episode list header and table header
-	visibleHeight := episodeListHeight - 4 // "Episodes" header + separator + table header + padding
-	if visibleHeight <= 0 {
-		return
-	}
-
-	// Center the selection if possible
-	targetOffset := v.selectedIdx - visibleHeight/2
-
-	// Apply bounds checking
-	maxOffset := len(v.getActiveEpisodes()) - visibleHeight
-	if maxOffset < 0 {
-		maxOffset = 0
-	}
-
-	if targetOffset < 0 {
-		v.scrollOffset = 0
-	} else if targetOffset > maxOffset {
-		v.scrollOffset = maxOffset
-	} else {
-		v.scrollOffset = targetOffset
-	}
-}
-
-// HandlePageDown scrolls down by one page (vim Ctrl+F)
 func (v *EpisodeListView) HandlePageDown() bool {
-	episodes := v.getActiveEpisodes()
-	if len(episodes) == 0 || v.screenHeight == 0 {
-		return false
-	}
-
-	// Calculate visible height accounting for description window
-	descriptionHeight := 15
-	episodeListHeight := v.screenHeight - descriptionHeight
-	if episodeListHeight < 5 {
-		episodeListHeight = v.screenHeight - 2
-	}
-	visibleHeight := episodeListHeight - 4
-	if visibleHeight <= 0 {
-		return false
-	}
-
-	// Page size with one line overlap
-	pageSize := visibleHeight - 1
-	if pageSize < 1 {
-		pageSize = 1
-	}
-
-	// Move selection down by page size
-	newIdx := v.selectedIdx + pageSize
-	if newIdx >= len(v.getActiveEpisodes()) {
-		newIdx = len(v.getActiveEpisodes()) - 1
-	}
-
-	if newIdx != v.selectedIdx {
-		v.selectedIdx = newIdx
-		v.ensureVisible()
-		v.descScrollOffset = 0  // Reset description scroll when changing episodes
+	if v.table.PageDown() {
+		v.descScrollOffset = 0
 		return true
 	}
 	return false
 }
 
-// HandlePageUp scrolls up by one page (vim Ctrl+B)
 func (v *EpisodeListView) HandlePageUp() bool {
-	episodes := v.getActiveEpisodes()
-	if len(episodes) == 0 || v.screenHeight == 0 {
-		return false
-	}
-
-	// Calculate visible height accounting for description window
-	descriptionHeight := 15
-	episodeListHeight := v.screenHeight - descriptionHeight
-	if episodeListHeight < 5 {
-		episodeListHeight = v.screenHeight - 2
-	}
-	visibleHeight := episodeListHeight - 4
-	if visibleHeight <= 0 {
-		return false
-	}
-
-	// Page size with one line overlap
-	pageSize := visibleHeight - 1
-	if pageSize < 1 {
-		pageSize = 1
-	}
-
-	// Move selection up by page size
-	newIdx := v.selectedIdx - pageSize
-	if newIdx < 0 {
-		newIdx = 0
-	}
-
-	if newIdx != v.selectedIdx {
-		v.selectedIdx = newIdx
-		v.ensureVisible()
-		v.descScrollOffset = 0  // Reset description scroll when changing episodes
+	if v.table.PageUp() {
+		v.descScrollOffset = 0
 		return true
 	}
 	return false
 }
 
-// drawTableHeader draws the column headers for the episode table
-func (v *EpisodeListView) drawTableHeader(s tcell.Screen, y, width int) {
-	headerStyle := tcell.StyleDefault.Bold(true).Foreground(ColorHeader)
-
-	// Calculate column widths
-	columns := v.calculateColumnWidths(width)
-
-	// Draw headers with padding
-	x := 1 // Start with 1 char padding from left edge
-	drawText(s, x, y, headerStyle, "Local")
-	x += columns.status + 1 // Add 1 space padding
-
-	drawText(s, x, y, headerStyle, "Title")
-	x += columns.title + 1 // Add 1 space padding
-
-	drawText(s, x, y, headerStyle, "Date")
-	x += columns.date + 1 // Add 1 space padding
-
-	drawText(s, x, y, headerStyle, "Position")
-}
-
-// drawEpisodeRow draws a single episode as a table row
-func (v *EpisodeListView) drawEpisodeRow(s tcell.Screen, y, width int, episode *models.Episode, selected bool, style tcell.Style) {
-	// Calculate column widths
-	columns := v.calculateColumnWidths(width)
-
-	// Clear the entire row with the selection style if selected
-	if selected {
-		for x := 0; x < width; x++ {
-			s.SetContent(x, y, ' ', nil, style)
-		}
-	}
-
-	// Draw selection indicator and download status with left padding
-	x := 1 // Start with 1 char padding from left edge
-	statusText := ""
-	if selected {
-		statusText = "> " // Add space after selection indicator
-	} else {
-		statusText = "  " // Two spaces to align when not selected
-	}
-	
-	// Add download indicator
-	downloadIndicator := v.getDownloadIndicator(episode)
-	if downloadIndicator != "" {
-		statusText += downloadIndicator
-	}
-	
-	v.drawColumnText(s, x, y, columns.status, statusText, style)
-	x += columns.status + 1 // Add 1 space padding
-
-	// Draw title with highlighting if search is active
-	title := episode.Title
+func (v *EpisodeListView) getActiveEpisodes() []*models.Episode {
 	if v.searchState.query != "" {
-		if matchResult, ok := v.matchResults[episode.ID]; ok && matchResult.MatchField == "title" {
-			v.drawColumnTextWithHighlight(s, x, y, columns.title, title, style, matchResult.Positions)
-		} else {
-			v.drawColumnText(s, x, y, columns.title, title, style)
-		}
-	} else {
-		v.drawColumnText(s, x, y, columns.title, title, style)
+		return v.filteredEpisodes
 	}
-	x += columns.title + 1 // Add 1 space padding
-
-	// Draw publish date
-	publishDate := v.formatPublishDate(episode.PublishDate)
-	v.drawColumnText(s, x, y, columns.date, publishDate, style)
-	x += columns.date + 1 // Add 1 space padding
-
-	// Draw listening position
-	position := v.formatListeningPosition(episode)
-	v.drawColumnText(s, x, y, columns.position, position, style)
+	return v.episodes
 }
 
-// columnWidths represents the calculated widths for each column
-type columnWidths struct {
-	status   int
-	title    int
-	date     int
-	position int
-}
-
-// calculateColumnWidths calculates optimal column widths based on terminal width
-func (v *EpisodeListView) calculateColumnWidths(totalWidth int) columnWidths {
-	// Define minimum and preferred column widths
-	const (
-		statusMin   = 9  // ">[⬇100%] " - widest possible status indicator, plus "Local" header needs 5 chars
-		dateMin     = 10 // "2024-01-15"
-		positionMin = 17 // "15:30/45:30" + 5 extra
-	)
-
-	// Calculate available width after accounting for fixed columns and padding
-	const padding = 3 // One space between each of the 4 columns (3 spaces total)
-	const edgePadding = 2 // 1 char padding on left and right edges
-	fixedWidth := statusMin + dateMin + positionMin + padding + edgePadding
-	availableForTitle := totalWidth - fixedWidth
-
-	// Ensure minimum title width
-	if availableForTitle < 20 {
-		availableForTitle = 20
-	}
-
-	return columnWidths{
-		status:   statusMin,
-		title:    availableForTitle,
-		date:     dateMin,
-		position: positionMin,
-	}
-}
-
-// drawColumnText draws text within a column, handling truncation
-func (v *EpisodeListView) drawColumnText(s tcell.Screen, x, y, width int, text string, style tcell.Style) {
-	if width <= 0 {
+func (v *EpisodeListView) applyFilter() {
+	v.matchResults = make(map[string]EpisodeMatchResult)
+	
+	if v.searchState.query == "" {
+		v.filteredEpisodes = v.episodes
+		v.updateTableRows()
 		return
 	}
-
-	// Convert to runes for proper Unicode handling
-	runes := []rune(text)
-	displayRunes := runes
-
-	// Truncate by rune count if it's too long for the column
-	if len(runes) > width {
-		if width > 3 {
-			displayRunes = append(runes[:width-3], []rune("...")...)
-		} else {
-			displayRunes = runes[:width]
+	
+	type scoredEpisode struct {
+		episode     *models.Episode
+		score       int
+		matchResult MatchResult
+		matchField  string
+	}
+	
+	var matched []scoredEpisode
+	for _, episode := range v.episodes {
+		if matches, score, matchResult, matchField := v.searchState.MatchEpisodeWithPositions(episode.Title, episode.ConvertedDescription); matches {
+			matched = append(matched, scoredEpisode{
+				episode:     episode,
+				score:       score,
+				matchResult: matchResult,
+				matchField:  matchField,
+			})
 		}
 	}
-
-	// Draw the text
-	charPos := 0
-	for _, r := range displayRunes {
-		if charPos >= width {
-			break
+	
+	sort.SliceStable(matched, func(i, j int) bool {
+		return matched[i].score > matched[j].score
+	})
+	
+	v.filteredEpisodes = make([]*models.Episode, len(matched))
+	for i, m := range matched {
+		v.filteredEpisodes[i] = m.episode
+		v.matchResults[m.episode.ID] = EpisodeMatchResult{
+			MatchResult: m.matchResult,
+			MatchField:  m.matchField,
 		}
-		s.SetContent(x+charPos, y, r, nil, style)
-		charPos++
 	}
-
-	// Pad remaining space in column
-	for i := charPos; i < width; i++ {
-		s.SetContent(x+i, y, ' ', nil, style)
-	}
+	
+	v.updateTableRows()
 }
 
-// drawColumnTextWithHighlight draws text with highlighting at specified positions
-func (v *EpisodeListView) drawColumnTextWithHighlight(s tcell.Screen, x, y, width int, text string, style tcell.Style, highlightPositions []int) {
-	if width <= 0 {
-		return
-	}
-
-	// Create highlight map
-	highlightMap := make(map[int]bool)
-	for _, pos := range highlightPositions {
-		highlightMap[pos] = true
+func (v *EpisodeListView) updateTableRows() {
+	episodes := v.getActiveEpisodes()
+	rows := make([]TableRow, len(episodes))
+	
+	podcastTitle := ""
+	if v.currentPodcast != nil {
+		podcastTitle = v.currentPodcast.Title
 	}
 	
-	highlightStyle := style.Foreground(ColorHighlight).Bold(true)
-	// Check if this is a selected row by comparing background color
-	if style.Background(ColorSelection) == style || style.Background(ColorGreen) == style {
-		// If selected or playing, use inverted highlight color
-		highlightStyle = style.Foreground(ColorBgDark).Background(ColorHighlight).Bold(true)
-	}
-
-	// Convert text to runes for proper Unicode handling
-	runes := []rune(text)
-	truncated := false
-	displayRunes := runes
-	
-	// Truncate by rune count, not byte count
-	if len(runes) > width {
-		truncated = true
-		if width > 3 {
-			displayRunes = runes[:width-3]
-		} else {
-			displayRunes = runes[:width]
-		}
-	}
-
-	// Draw the text with highlights
-	charPos := 0
-	for runeIdx, r := range displayRunes {
-		if charPos >= width {
-			break
+	for i, episode := range episodes {
+		var matchResult *EpisodeMatchResult
+		if mr, ok := v.matchResults[episode.ID]; ok {
+			matchResult = &mr
 		}
 		
-		charStyle := style
-		if highlightMap[runeIdx] {
-			charStyle = highlightStyle
+		rows[i] = &EpisodeTableRow{
+			episode:         episode,
+			matchResult:     matchResult,
+			downloadManager: v.downloadManager,
+			currentEpisode:  v.currentEpisode,
+			player:          v.player,
+			podcastTitle:    podcastTitle,
 		}
-		
-		s.SetContent(x+charPos, y, r, nil, charStyle)
-		charPos++
 	}
 	
-	// Add ellipsis if truncated
-	if truncated && width > 3 {
-		for i := 0; i < 3 && charPos < width; i++ {
-			s.SetContent(x+charPos, y, '.', nil, style)
-			charPos++
-		}
-	}
-
-	// Pad remaining space in column
-	for i := charPos; i < width; i++ {
-		s.SetContent(x+i, y, ' ', nil, style)
-	}
+	v.table.SetRows(rows)
 }
 
-// formatPublishDate formats a publish date for display in local time
-func (v *EpisodeListView) formatPublishDate(publishDate time.Time) string {
-	if publishDate.IsZero() {
-		return "—"
-	}
-
-	// Convert to local time
-	localDate := publishDate.Local()
-	now := time.Now()
-	
-	if localDate.Year() == now.Year() {
-		return localDate.Format("Jan 02")
-	}
-	return localDate.Format("2006-01-02")
+func (v *EpisodeListView) GetSearchState() *SearchState {
+	return v.searchState
 }
 
-// formatListeningPosition formats the listening position with total duration context
-func (v *EpisodeListView) formatListeningPosition(episode *models.Episode) string {
-	position := episode.Position
-	duration := episode.Duration
-
-	if position == 0 {
-		if duration > 0 {
-			return "0:00/" + v.formatDuration(duration)
-		}
-		return "—"
-	}
-
-	// Format position
-	posStr := v.formatDuration(position)
-
-	// Add total duration if available
-	if duration > 0 {
-		return posStr + "/" + v.formatDuration(duration)
-	}
-
-	return posStr
+func (v *EpisodeListView) UpdateSearch() {
+	v.applyFilter()
 }
 
-// formatDuration formats a time.Duration into a readable string
-func (v *EpisodeListView) formatDuration(d time.Duration) string {
+// Helper function for duration formatting
+func formatDuration(d time.Duration) string {
 	totalSeconds := int(d.Seconds())
 	hours := totalSeconds / 3600
 	minutes := (totalSeconds % 3600) / 60
@@ -688,66 +481,46 @@ func (v *EpisodeListView) formatDuration(d time.Duration) string {
 	return fmt.Sprintf("%d:%02d", minutes, seconds)
 }
 
-// drawDescriptionWindow renders the description window at the bottom of the screen
+// drawDescriptionWindow and related methods are similar to PodcastListViewV2
 func (v *EpisodeListView) drawDescriptionWindow(s tcell.Screen, startY, width, height int) {
-	// Get the actual screen height to ensure we clear everything
 	_, screenHeight := s.Size()
 	
-	// Clear from startY to the bottom of the screen (not just the allocated height)
-	// Force tcell to update by using different runes and styles
 	clearStyle := tcell.StyleDefault.Background(ColorBg).Foreground(ColorBg)
 	for y := startY; y < screenHeight; y++ {
 		for x := 0; x < width; x++ {
-			// First set to a different character to force update
-			s.SetContent(x, y, '\u00A0', nil, clearStyle) // Non-breaking space
-			// Then set to regular space
 			s.SetContent(x, y, ' ', nil, clearStyle)
 		}
 	}
 	
-	// Get selected episode and its converted description
 	selectedEpisode := v.GetSelected()
 	description := ""
 	if selectedEpisode != nil {
 		description = selectedEpisode.ConvertedDescription
-		// Fall back to original if not converted yet
 		if description == "" {
 			description = selectedEpisode.Description
 		}
 	}
 
-	// Draw separator line
 	separatorStyle := tcell.StyleDefault.Foreground(ColorFgGutter)
 	for x := 0; x < width; x++ {
 		s.SetContent(x, startY, '─', nil, separatorStyle)
 	}
 	
-	// Draw description header
 	headerStyle := tcell.StyleDefault.Bold(true)
 	drawText(s, 0, startY+1, headerStyle, "Description")
 
-	// Draw description content with text wrapping
 	if description != "" {
-		// Check if we have match positions for this episode's description
 		var highlightPositions []int
 		if selectedEpisode != nil && v.searchState.query != "" {
-			// Check if the match was in the description
 			if matchResult, ok := v.matchResults[selectedEpisode.ID]; ok && matchResult.MatchField == "description" {
-				// Use the stored match positions directly
 				highlightPositions = matchResult.Positions
 			}
 		}
 
-		// Wrap text to fit width with padding
-		contentWidth := width - 2 // Leave 1 char padding on each side
-		// Since we're using pre-converted text, we don't have styles
-		// We could re-parse for styles if needed, but for now just display without styles
+		contentWidth := width - 2
 		wrappedLines := v.wrapStyledText(description, contentWidth, highlightPositions, nil)
 
-		// Draw description lines (limit to available height)
-		maxLines := height - 3 // Account for separator, header, and padding
-
-		// Ensure scroll offset doesn't exceed content
+		maxLines := height - 3
 		maxScrollOffset := len(wrappedLines) - maxLines
 		if maxScrollOffset < 0 {
 			maxScrollOffset = 0
@@ -756,18 +529,15 @@ func (v *EpisodeListView) drawDescriptionWindow(s tcell.Screen, startY, width, h
 			v.descScrollOffset = maxScrollOffset
 		}
 
-		// Draw visible lines based on scroll offset
 		for i := 0; i < maxLines; i++ {
 			lineY := startY + 2 + i
 			lineIdx := i + v.descScrollOffset
 			
-			// Draw content if available
 			if lineIdx < len(wrappedLines) {
 				v.drawStyledLine(s, 1, lineY, contentWidth, wrappedLines[lineIdx])
 			}
 		}
 
-		// Show scroll indicators
 		if v.descScrollOffset > 0 || len(wrappedLines) > maxLines {
 			scrollStyle := tcell.StyleDefault.Foreground(ColorDimmed)
 			scrollInfo := fmt.Sprintf("[%d-%d/%d]", v.descScrollOffset+1, 
@@ -775,419 +545,44 @@ func (v *EpisodeListView) drawDescriptionWindow(s tcell.Screen, startY, width, h
 			drawText(s, width-len(scrollInfo)-2, startY+1, scrollStyle, scrollInfo)
 		}
 	} else {
-		// Show placeholder when no description available
 		placeholderStyle := tcell.StyleDefault.Foreground(ColorDimmed)
 		drawText(s, 1, startY+2, placeholderStyle, "No description available")
 	}
 }
 
-
-// wrapText wraps text to fit within the specified width
-func (v *EpisodeListView) wrapText(text string, width int) []string {
-	if width <= 0 {
-		return []string{}
-	}
-
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return []string{}
-	}
-
-	var lines []string
-	var currentLine strings.Builder
-
-	for _, word := range words {
-		// Check if adding this word would exceed the width
-		currentLineRuneCount := len([]rune(currentLine.String()))
-		wordRuneCount := len([]rune(word))
-		if currentLineRuneCount > 0 && currentLineRuneCount+1+wordRuneCount > width {
-			// Start a new line
-			lines = append(lines, currentLine.String())
-			currentLine.Reset()
-		}
-
-		// Add word to current line
-		if currentLine.Len() > 0 {
-			currentLine.WriteString(" ")
-		}
-		currentLine.WriteString(word)
-
-		// Handle very long words that exceed width
-		if len([]rune(currentLine.String())) > width {
-			lines = append(lines, currentLine.String())
-			currentLine.Reset()
-		}
-	}
-
-	// Add the last line if it has content
-	if currentLine.Len() > 0 {
-		lines = append(lines, currentLine.String())
-	}
-
-	return lines
-}
-
-// lineWithHighlights represents a line of text with highlight positions
-type lineWithHighlights struct {
-	text      string
-	positions []int
-}
-
-// wrapTextWithHighlights wraps text while preserving highlight positions
-func (v *EpisodeListView) wrapTextWithHighlights(text string, width int, highlightPositions []int) []lineWithHighlights {
-	if width <= 0 {
-		return []lineWithHighlights{}
-	}
-
-	// Create a map for quick highlight position lookup
-	highlightMap := make(map[int]bool)
-	for _, pos := range highlightPositions {
-		highlightMap[pos] = true
-	}
-
-	// Handle text cleaning - we need to track how positions map after cleaning
-	// Since cleanDescription converts multiple spaces to single spaces,
-	// we need to map original positions to cleaned positions
-	cleanedText := text
-	positionMapping := make(map[int]int) // original pos -> cleaned pos
-	
-	// Simple position mapping (assumes cleanDescription was already called)
-	for i := 0; i < len(text); i++ {
-		positionMapping[i] = i
-	}
-
-	words := strings.Fields(cleanedText)
-	if len(words) == 0 {
-		return []lineWithHighlights{}
-	}
-
-	var lines []lineWithHighlights
-	var currentLine strings.Builder
-	var currentPositions []int
-
-	// Find word positions in the cleaned text (as rune positions)
-	wordPositions := make([]int, len(words))
-	runePos := 0
-	cleanedRunes := []rune(cleanedText)
-	
-	for i, word := range words {
-		// Find the word starting from current position
-		wordRunes := []rune(word)
-		found := false
-		
-		for j := runePos; j <= len(cleanedRunes)-len(wordRunes); j++ {
-			if string(cleanedRunes[j:j+len(wordRunes)]) == word {
-				wordPositions[i] = j
-				runePos = j + len(wordRunes)
-				found = true
-				break
-			}
-		}
-		
-		if !found {
-			// Shouldn't happen with properly split words
-			wordPositions[i] = runePos
-		}
-	}
-
-	for wordIdx, word := range words {
-		wordStartPos := wordPositions[wordIdx]
-		
-		// Check if adding this word would exceed the width
-		currentLineRuneCount := len([]rune(currentLine.String()))
-		wordRuneCount := len([]rune(word))
-		if currentLineRuneCount > 0 && currentLineRuneCount+1+wordRuneCount > width {
-			// Start a new line
-			lines = append(lines, lineWithHighlights{
-				text:      currentLine.String(),
-				positions: currentPositions,
-			})
-			currentLine.Reset()
-			currentPositions = nil
-		}
-
-		// Add space before word (if not first word)
-		lineOffset := len([]rune(currentLine.String()))
-		if currentLine.Len() > 0 {
-			currentLine.WriteString(" ")
-			lineOffset++
-		}
-
-		// Add word to current line
-		currentLine.WriteString(word)
-
-		// Map highlight positions for this word
-		wordRunes := []rune(word)
-		for i := 0; i < len(wordRunes); i++ {
-			origPos := wordStartPos + i
-			if highlightMap[origPos] {
-				currentPositions = append(currentPositions, lineOffset+i)
-			}
-		}
-
-		// Handle very long words that exceed width
-		if len([]rune(currentLine.String())) > width {
-			lines = append(lines, lineWithHighlights{
-				text:      currentLine.String(),
-				positions: currentPositions,
-			})
-			currentLine.Reset()
-			currentPositions = nil
-		}
-	}
-
-	// Add the last line if it has content
-	if currentLine.Len() > 0 {
-		lines = append(lines, lineWithHighlights{
-			text:      currentLine.String(),
-			positions: currentPositions,
-		})
-	}
-
-	return lines
-}
-
-// drawLineWithHighlights draws a single line with highlighted positions
-func (v *EpisodeListView) drawLineWithHighlights(s tcell.Screen, x, y, maxWidth int, style, highlightStyle tcell.Style, line lineWithHighlights) {
-	// Create highlight map for this line
-	highlightMap := make(map[int]bool)
-	for _, pos := range line.positions {
-		highlightMap[pos] = true
-	}
-
-	// Convert to runes for proper positioning
-	runes := []rune(line.text)
-	
-	// Draw each character with appropriate style
-	screenPos := 0
-	for runeIdx, r := range runes {
-		if screenPos >= maxWidth {
-			break
-		}
-		
-		charStyle := style
-		if highlightMap[runeIdx] {
-			charStyle = highlightStyle
-		}
-		
-		s.SetContent(x+screenPos, y, r, nil, charStyle)
-		screenPos++
-	}
-	
-	// Pad the rest of the line
-	for i := screenPos; i < maxWidth; i++ {
-		s.SetContent(x+i, y, ' ', nil, style)
-	}
-}
-
-// getDownloadIndicator returns the appropriate download status indicator for an episode
-func (v *EpisodeListView) getDownloadIndicator(episode *models.Episode) string {
-	// First check if this is the currently playing/paused episode
-	if v.currentEpisode != nil && episode.ID == v.currentEpisode.ID && v.player != nil {
-		if v.player.GetState() == player.StatePlaying {
-			return "▶" // Playing indicator
-		} else if v.player.GetState() == player.StatePaused {
-			return "⏸" // Paused indicator
-		}
-	}
-	
-	if v.downloadManager == nil {
-		return ""
-	}
-
-	// Check if episode is downloaded using comprehensive check (filesystem + registry)
-	podcastTitle := ""
-	if v.currentPodcast != nil {
-		podcastTitle = v.currentPodcast.Title
-	}
-	
-	if v.downloadManager.IsEpisodeDownloaded(episode, podcastTitle) {
-		return "✔"
-	}
-
-	// Only check download manager state if episode is NOT already downloaded
-	// and if it's actively downloading or queued
-	if v.downloadManager.IsDownloading(episode.ID) {
-		if progress, exists := v.downloadManager.GetDownloadProgress(episode.ID); exists {
-			switch progress.Status {
-			case download.StatusDownloading:
-				return fmt.Sprintf("[⬇%.0f%%]", progress.Progress*100)
-			case download.StatusQueued:
-				return "[⏸]"
-			case download.StatusFailed:
-				return "[⚠]"
-			default:
-				return "[⬇]"
-			}
-		} else {
-			// Downloading but no progress yet
-			return "[⬇]"
-		}
-	}
-
-	// Check for failed downloads that aren't currently downloading
-	if progress, exists := v.downloadManager.GetDownloadProgress(episode.ID); exists {
-		if progress.Status == download.StatusFailed {
-			return "[⚠]"
-		}
-	}
-
-	return ""
-}
-
-// getActiveEpisodes returns either filtered episodes or all episodes based on search state
-func (v *EpisodeListView) getActiveEpisodes() []*models.Episode {
-	if v.searchState.query != "" {
-		return v.filteredEpisodes
-	}
-	return v.episodes
-}
-
-// applyFilter filters episodes based on the current search query
-func (v *EpisodeListView) applyFilter() {
-	// Clear match results
-	v.matchResults = make(map[string]EpisodeMatchResult)
-	
-	if v.searchState.query == "" {
-		v.filteredEpisodes = v.episodes
-		v.adjustSelectionAfterFilter()
-		return
-	}
-	
-	// Score and filter episodes
-	type scoredEpisode struct {
-		episode *models.Episode
-		score   int
-		matchResult MatchResult
-		matchField string
-	}
-	
-	var matched []scoredEpisode
-	for _, episode := range v.episodes {
-		// Use pre-converted description for searching
-		if matches, score, matchResult, matchField := v.searchState.MatchEpisodeWithPositions(episode.Title, episode.ConvertedDescription); matches {
-			matched = append(matched, scoredEpisode{
-				episode: episode, 
-				score: score,
-				matchResult: matchResult,
-				matchField: matchField,
-			})
-		}
-	}
-	
-	// Sort by score (highest first) and maintain original order for equal scores
-	sort.SliceStable(matched, func(i, j int) bool {
-		return matched[i].score > matched[j].score
-	})
-	
-	// Extract sorted episodes and store match results
-	v.filteredEpisodes = make([]*models.Episode, len(matched))
-	for i, m := range matched {
-		v.filteredEpisodes[i] = m.episode
-		// Store match result by episode ID for later highlighting
-		v.matchResults[m.episode.ID] = EpisodeMatchResult{
-			MatchResult: m.matchResult,
-			MatchField: m.matchField,
-		}
-	}
-	
-	v.adjustSelectionAfterFilter()
-}
-
-// adjustSelectionAfterFilter ensures selection stays valid after filtering
-func (v *EpisodeListView) adjustSelectionAfterFilter() {
-	episodes := v.getActiveEpisodes()
-	if len(episodes) == 0 {
-		v.selectedIdx = 0
-		v.scrollOffset = 0
-		return
-	}
-	
-	// When search query is active, always select the first result
-	if v.searchState.query != "" {
-		v.selectedIdx = 0
-		v.scrollOffset = 0
-		return
-	}
-	
-	// When clearing search, try to keep the same episode selected if possible
-	if v.selectedIdx < len(v.episodes) {
-		prevSelected := v.episodes[v.selectedIdx]
-		for i, ep := range episodes {
-			if ep.ID == prevSelected.ID {
-				v.selectedIdx = i
-				v.ensureVisible()
-				return
-			}
-		}
-	}
-	
-	// Otherwise reset to top
-	v.selectedIdx = 0
-	v.scrollOffset = 0
-}
-
-// GetSearchState returns the search state for external access
-func (v *EpisodeListView) GetSearchState() *SearchState {
-	return v.searchState
-}
-
-// min returns the minimum of two integers
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// UpdateSearch updates the search and applies filtering
-func (v *EpisodeListView) UpdateSearch() {
-	v.applyFilter()
-}
-
-
-// wrapStyledText wraps styled text while preserving both styles and highlight positions
+// Reuse text wrapping methods from PodcastListViewV2
 func (v *EpisodeListView) wrapStyledText(text string, width int, highlightPositions []int, styles []markdown.StyleRange) []styledLineWithHighlights {
 	if width <= 0 {
 		return []styledLineWithHighlights{}
 	}
 
-	// Create highlight map
 	highlightMap := make(map[int]bool)
 	for _, pos := range highlightPositions {
 		highlightMap[pos] = true
 	}
 
-	// Split text by newlines first to preserve paragraph breaks
 	paragraphs := splitPreservingNewlines(text)
 	var allLines []styledLineWithHighlights
-	globalRunePos := 0 // Track position across entire text
+	globalRunePos := 0
 	
 	for paragraphIdx, paragraph := range paragraphs {
-		// Handle empty lines (preserve them)
 		if paragraph == "" {
 			allLines = append(allLines, styledLineWithHighlights{
 				text:      "",
 				positions: nil,
 				styles:    nil,
 			})
-			// Account for the newline character if not the last paragraph
 			if paragraphIdx < len(paragraphs)-1 {
 				globalRunePos++
 			}
 			continue
 		}
 		
-		// Process non-empty paragraph
 		paragraphRunes := []rune(paragraph)
-		
-		// Wrap this paragraph
 		paragraphLines := v.wrapParagraphWithStyles(paragraph, width, globalRunePos, highlightMap, styles)
 		allLines = append(allLines, paragraphLines...)
 		
-		// Update global position
 		globalRunePos += len(paragraphRunes)
-		// Account for the newline character if not the last paragraph
 		if paragraphIdx < len(paragraphs)-1 {
 			globalRunePos++
 		}
@@ -1196,7 +591,6 @@ func (v *EpisodeListView) wrapStyledText(text string, width int, highlightPositi
 	return allLines
 }
 
-// wrapParagraphWithStyles wraps a single paragraph preserving styles and highlights
 func (v *EpisodeListView) wrapParagraphWithStyles(paragraph string, width int, paragraphStartPos int, highlightMap map[int]bool, styles []markdown.StyleRange) []styledLineWithHighlights {
 	words := strings.Fields(paragraph)
 	if len(words) == 0 {
@@ -1208,13 +602,11 @@ func (v *EpisodeListView) wrapParagraphWithStyles(paragraph string, width int, p
 	var currentHighlights []int
 	var currentStyles []markdown.StyleRange
 
-	// Find word positions in the paragraph (as rune positions)
 	wordPositions := make([]int, len(words))
 	runePos := 0
 	paragraphRunes := []rune(paragraph)
 	
 	for i, word := range words {
-		// Find the word starting from current position
 		wordRunes := []rune(word)
 		found := false
 		
@@ -1236,11 +628,9 @@ func (v *EpisodeListView) wrapParagraphWithStyles(paragraph string, width int, p
 		wordStartPosInParagraph := wordPositions[wordIdx]
 		wordStartPosGlobal := paragraphStartPos + wordStartPosInParagraph
 		
-		// Check if adding this word would exceed the width
 		currentLineRuneCount := len([]rune(currentLine.String()))
 		wordRuneCount := len([]rune(word))
 		if currentLineRuneCount > 0 && currentLineRuneCount+1+wordRuneCount > width {
-			// Start a new line
 			lines = append(lines, styledLineWithHighlights{
 				text:      currentLine.String(),
 				positions: currentHighlights,
@@ -1251,17 +641,14 @@ func (v *EpisodeListView) wrapParagraphWithStyles(paragraph string, width int, p
 			currentStyles = nil
 		}
 
-		// Add space before word (if not first word)
 		lineOffset := len([]rune(currentLine.String()))
 		if currentLine.Len() > 0 {
 			currentLine.WriteString(" ")
 			lineOffset++
 		}
 
-		// Add word to current line
 		currentLine.WriteString(word)
 
-		// Map highlight positions for this word
 		wordRunes := []rune(word)
 		for i := 0; i < len(wordRunes); i++ {
 			globalPos := wordStartPosGlobal + i
@@ -1270,17 +657,14 @@ func (v *EpisodeListView) wrapParagraphWithStyles(paragraph string, width int, p
 			}
 		}
 
-		// Find styles that apply to this word
 		for _, style := range styles {
 			if style.Start <= wordStartPosGlobal && style.End > wordStartPosGlobal {
-				// This style applies to at least part of this word
 				lineStyle := markdown.StyleRange{
 					Start: lineOffset,
 					End:   lineOffset + wordRuneCount,
 					Type:  style.Type,
 				}
 				
-				// Adjust if style starts or ends within the word
 				if style.Start > wordStartPosGlobal {
 					lineStyle.Start = lineOffset + (style.Start - wordStartPosGlobal)
 				}
@@ -1292,7 +676,6 @@ func (v *EpisodeListView) wrapParagraphWithStyles(paragraph string, width int, p
 			}
 		}
 
-		// Handle very long words that exceed width
 		if len([]rune(currentLine.String())) > width {
 			lines = append(lines, styledLineWithHighlights{
 				text:      currentLine.String(),
@@ -1305,7 +688,6 @@ func (v *EpisodeListView) wrapParagraphWithStyles(paragraph string, width int, p
 		}
 	}
 
-	// Add the last line if it has content
 	if currentLine.Len() > 0 {
 		lines = append(lines, styledLineWithHighlights{
 			text:      currentLine.String(),
@@ -1317,31 +699,23 @@ func (v *EpisodeListView) wrapParagraphWithStyles(paragraph string, width int, p
 	return lines
 }
 
-// drawStyledLine draws a line with both styles and highlights
 func (v *EpisodeListView) drawStyledLine(s tcell.Screen, x, y, maxWidth int, line styledLineWithHighlights) {
-	// Create highlight map for this line
 	highlightMap := make(map[int]bool)
 	for _, pos := range line.positions {
 		highlightMap[pos] = true
 	}
 
-	// Convert to runes for proper positioning
 	runes := []rune(line.text)
-	
-	// Default styles
 	defaultStyle := tcell.StyleDefault.Foreground(ColorFg)
 	
-	// Draw each character with appropriate style
 	screenPos := 0
 	for runeIdx, r := range runes {
 		if screenPos >= maxWidth {
 			break
 		}
 		
-		// Start with default style
 		charStyle := defaultStyle
 		
-		// Apply any styles that cover this position
 		for _, styleRange := range line.styles {
 			if runeIdx >= styleRange.Start && runeIdx < styleRange.End {
 				charStyle = GetTcellStyle(styleRange.Type)
@@ -1349,9 +723,7 @@ func (v *EpisodeListView) drawStyledLine(s tcell.Screen, x, y, maxWidth int, lin
 			}
 		}
 		
-		// Apply highlight if needed (highlight takes precedence)
 		if highlightMap[runeIdx] {
-			// Preserve existing formatting but add highlight color
 			charStyle = charStyle.Foreground(ColorHighlight).Bold(true)
 		}
 		
@@ -1359,7 +731,6 @@ func (v *EpisodeListView) drawStyledLine(s tcell.Screen, x, y, maxWidth int, lin
 		screenPos++
 	}
 	
-	// Pad the rest of the line
 	for i := screenPos; i < maxWidth; i++ {
 		s.SetContent(x+i, y, ' ', nil, defaultStyle)
 	}

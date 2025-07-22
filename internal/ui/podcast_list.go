@@ -4,37 +4,107 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	
+	"time"
+
 	"github.com/csams/podcast-tui/internal/markdown"
 	"github.com/csams/podcast-tui/internal/models"
 	"github.com/gdamore/tcell/v2"
 )
 
-type PodcastListView struct {
-	podcasts         []*models.Podcast
-	filteredPodcasts []*models.Podcast  // Podcasts after search filtering
-	matchResults     map[string]PodcastMatchResult  // Match results keyed by podcast URL
-	selectedIdx      int
-	scrollOffset     int
-	screenHeight     int
-	searchState      *SearchState
-	descScrollOffset int  // Scroll offset for description window
+// PodcastTableRow adapts a podcast to the TableRow interface
+type PodcastTableRow struct {
+	podcast     *models.Podcast
+	matchResult *PodcastMatchResult
 }
 
-// PodcastMatchResult stores match result and which field matched
-type PodcastMatchResult struct {
-	MatchResult
-	MatchField string  // "title" or "description"
+func (r *PodcastTableRow) GetCell(columnIndex int) string {
+	switch columnIndex {
+	case 0: // Status column (selection indicator handled by table)
+		return ""
+	case 1: // Title
+		return r.podcast.Title
+	case 2: // URL
+		return r.podcast.URL
+	case 3: // Latest episode date
+		return r.getLatestEpisodeDate()
+	case 4: // Episode count
+		return fmt.Sprintf("%d eps", len(r.podcast.Episodes))
+	default:
+		return ""
+	}
+}
+
+func (r *PodcastTableRow) GetCellStyle(columnIndex int, selected bool) *tcell.Style {
+	// No custom cell styles needed for podcasts
+	return nil
+}
+
+func (r *PodcastTableRow) GetHighlightPositions(columnIndex int) []int {
+	if r.matchResult == nil {
+		return nil
+	}
+	
+	switch columnIndex {
+	case 1: // Title
+		if r.matchResult.MatchField == "title" {
+			return r.matchResult.Positions
+		}
+	}
+	return nil
+}
+
+func (r *PodcastTableRow) getLatestEpisodeDate() string {
+	if len(r.podcast.Episodes) == 0 {
+		return "—"
+	}
+
+	var latestDate time.Time
+	for _, episode := range r.podcast.Episodes {
+		if episode.PublishDate.After(latestDate) {
+			latestDate = episode.PublishDate
+		}
+	}
+
+	if latestDate.IsZero() {
+		return "—"
+	}
+
+	localDate := latestDate.Local()
+	now := time.Now()
+	if localDate.Year() == now.Year() {
+		return localDate.Format("Jan 02")
+	}
+	return localDate.Format("2006-01-02")
+}
+
+// PodcastListView is the podcast list using the table abstraction
+type PodcastListView struct {
+	table            *Table
+	podcasts         []*models.Podcast
+	filteredPodcasts []*models.Podcast
+	matchResults     map[string]PodcastMatchResult
+	searchState      *SearchState
+	descScrollOffset int
 }
 
 func NewPodcastListView() *PodcastListView {
-	return &PodcastListView{
-		podcasts:         []*models.Podcast{},
-		filteredPodcasts: []*models.Podcast{},
-		matchResults:     make(map[string]PodcastMatchResult),
-		selectedIdx:      0,
-		searchState:      NewSearchState(),
+	v := &PodcastListView{
+		table:        NewTable(),
+		podcasts:     []*models.Podcast{},
+		matchResults: make(map[string]PodcastMatchResult),
+		searchState:  NewSearchState(),
 	}
+	
+	// Configure table columns
+	v.table.SetColumns([]TableColumn{
+		{Title: "", Width: 2, Align: AlignLeft},                    // Status
+		{Title: "Title", MinWidth: 20, FlexWeight: 0.6, Align: AlignLeft},   // Title
+		{Title: "Feed URL", MinWidth: 20, FlexWeight: 0.4, Align: AlignLeft}, // URL
+		{Title: "Latest", Width: 10, Align: AlignLeft},            // Latest date
+		{Title: "Episodes", Width: 8, Align: AlignLeft},           // Count
+	})
+	
+	return v
 }
 
 func (v *PodcastListView) SetSubscriptions(subs *models.Subscriptions) {
@@ -43,31 +113,32 @@ func (v *PodcastListView) SetSubscriptions(subs *models.Subscriptions) {
 }
 
 func (v *PodcastListView) GetSelected() *models.Podcast {
-	// Use filtered podcasts if filter is active
-	podcasts := v.getActivePodcasts()
-	if v.selectedIdx < 0 || v.selectedIdx >= len(podcasts) {
-		return nil
+	row := v.table.GetSelectedRow()
+	if row != nil {
+		if podcastRow, ok := row.(*PodcastTableRow); ok {
+			return podcastRow.podcast
+		}
 	}
-	return podcasts[v.selectedIdx]
+	return nil
 }
 
 func (v *PodcastListView) Draw(s tcell.Screen) {
 	w, h := s.Size()
-	v.screenHeight = h
-
-	// Calculate space allocation: reserve bottom area for description
-	descriptionHeight := 15 // Reserve 15 lines for description (including borders)
+	
+	// Calculate space allocation
+	descriptionHeight := 15
 	podcastListHeight := h - descriptionHeight
-	if podcastListHeight < 5 { // Minimum space for podcast list
+	if podcastListHeight < 5 {
 		podcastListHeight = h - 2
 		descriptionHeight = 2
 	}
-
+	
+	// Draw header
 	drawText(s, 0, 0, tcell.StyleDefault.Bold(true), "Podcasts")
 	for x := 0; x < w; x++ {
 		s.SetContent(x, 1, '─', nil, tcell.StyleDefault)
 	}
-
+	
 	// Show search query if active
 	if v.searchState.query != "" {
 		searchStyle := tcell.StyleDefault.Foreground(ColorHighlight)
@@ -79,12 +150,11 @@ func (v *PodcastListView) Draw(s tcell.Screen) {
 			modeText = "[Permissive] "
 		case ScoreThresholdNone:
 			modeText = "[All] "
-		// Normal mode shows no prefix
 		}
 		searchText := fmt.Sprintf("%sFilter: %s (%d matches)", modeText, v.searchState.query, len(v.filteredPodcasts))
 		drawText(s, w-len(searchText)-2, 0, searchStyle, searchText)
 	}
-
+	
 	// Show helpful message if no podcasts
 	podcasts := v.getActivePodcasts()
 	if len(podcasts) == 0 {
@@ -98,40 +168,20 @@ func (v *PodcastListView) Draw(s tcell.Screen) {
 		}
 		return
 	}
-
-	// Draw table header
-	v.drawTableHeader(s, 2, w)
-
-	// Draw podcast rows as table
-	visibleHeight := podcastListHeight - 4 // Account for header row
-	for i := 0; i < visibleHeight && i+v.scrollOffset < len(podcasts); i++ {
-		idx := i + v.scrollOffset
-		podcast := podcasts[idx]
-
-		style := tcell.StyleDefault
-		if idx == v.selectedIdx {
-			style = style.Background(ColorSelection).Foreground(ColorBright)
-		}
-
-		// Draw podcast row in table format
-		v.drawPodcastRow(s, i+3, w, podcast, idx == v.selectedIdx, style)
-	}
 	
-	// Show scroll indicator if there are more items than visible
-	if len(podcasts) > visibleHeight {
+	// Configure and draw table
+	v.table.SetPosition(0, 2)
+	v.table.SetSize(w, podcastListHeight - 2)
+	v.table.Draw(s)
+	
+	// Show scroll indicator
+	if first, last, total := v.table.GetScrollInfo(); total > last-first+1 {
 		scrollStyle := tcell.StyleDefault.Foreground(ColorDimmed)
-		// Calculate visible range
-		firstVisible := v.scrollOffset + 1
-		lastVisible := v.scrollOffset + visibleHeight
-		if lastVisible > len(podcasts) {
-			lastVisible = len(podcasts)
-		}
-		scrollInfo := fmt.Sprintf("[%d-%d/%d]", firstVisible, lastVisible, len(podcasts))
+		scrollInfo := fmt.Sprintf("[%d-%d/%d]", first, last, total)
 		
-		// Position in the title bar, but not overlapping with search info
-		scrollX := len("Podcasts") + 2
+		headerText := "Podcasts"
+		scrollX := len(headerText) + 2
 		if v.searchState.query != "" {
-			// If search is active, make sure we don't overlap
 			searchTextLen := len(fmt.Sprintf("Filter: %s (%d matches)", v.searchState.query, len(v.filteredPodcasts))) + 10
 			maxScrollX := w - searchTextLen - 2 - len(scrollInfo)
 			if scrollX > maxScrollX {
@@ -141,7 +191,7 @@ func (v *PodcastListView) Draw(s tcell.Screen) {
 		drawText(s, scrollX, 0, scrollStyle, scrollInfo)
 	}
 	
-	// Draw description window at the bottom
+	// Draw description window
 	if descriptionHeight > 2 {
 		v.drawDescriptionWindow(s, podcastListHeight, w, descriptionHeight)
 	}
@@ -154,11 +204,9 @@ func (v *PodcastListView) HandleKey(ev *tcell.EventKey) bool {
 		if ev.Modifiers()&tcell.ModAlt != 0 {
 			switch ev.Rune() {
 			case 'j':
-				// Scroll description down
 				v.descScrollOffset++
 				return true
 			case 'k':
-				// Scroll description up
 				if v.descScrollOffset > 0 {
 					v.descScrollOffset--
 				}
@@ -168,154 +216,44 @@ func (v *PodcastListView) HandleKey(ev *tcell.EventKey) bool {
 		
 		switch ev.Rune() {
 		case 'j':
-			podcasts := v.getActivePodcasts()
-			if v.selectedIdx < len(podcasts)-1 {
-				v.selectedIdx++
-				v.ensureVisible()
-				v.descScrollOffset = 0  // Reset description scroll when changing podcasts
+			if v.table.SelectNext() {
+				v.descScrollOffset = 0
 				return true
 			}
 		case 'k':
-			if v.selectedIdx > 0 {
-				v.selectedIdx--
-				v.ensureVisible()
-				v.descScrollOffset = 0  // Reset description scroll when changing podcasts
+			if v.table.SelectPrevious() {
+				v.descScrollOffset = 0
 				return true
 			}
 		case 'g':
-			v.selectedIdx = 0
-			v.scrollOffset = 0
-			v.descScrollOffset = 0  // Reset description scroll
+			v.table.SelectFirst()
+			v.descScrollOffset = 0
 			return true
 		case 'G':
-			podcasts := v.getActivePodcasts()
-			v.selectedIdx = len(podcasts) - 1
-			v.ensureVisible()
-			v.descScrollOffset = 0  // Reset description scroll
+			v.table.SelectLast()
+			v.descScrollOffset = 0
 			return true
 		}
 	}
 	return false
 }
 
-func (v *PodcastListView) ensureVisible() {
-	podcasts := v.getActivePodcasts()
-	if len(podcasts) == 0 || v.screenHeight == 0 {
-		return
-	}
-
-	// Account for description window (15 lines) and headers
-	descriptionHeight := 15
-	podcastListHeight := v.screenHeight - descriptionHeight
-	if podcastListHeight < 5 { // Minimum space for podcast list
-		podcastListHeight = v.screenHeight - 2
-	}
-	
-	// Calculate visible area for podcast list
-	visibleHeight := podcastListHeight - 4 // Account for headers and separators
-	if visibleHeight <= 0 {
-		return
-	}
-
-	// Center the selection if possible
-	targetOffset := v.selectedIdx - visibleHeight/2
-
-	// Apply bounds checking
-	maxOffset := len(v.getActivePodcasts()) - visibleHeight
-	if maxOffset < 0 {
-		maxOffset = 0
-	}
-
-	if targetOffset < 0 {
-		v.scrollOffset = 0
-	} else if targetOffset > maxOffset {
-		v.scrollOffset = maxOffset
-	} else {
-		v.scrollOffset = targetOffset
-	}
-}
-
-// HandlePageDown scrolls down by one page (vim Ctrl+F)
 func (v *PodcastListView) HandlePageDown() bool {
-	podcasts := v.getActivePodcasts()
-	if len(podcasts) == 0 || v.screenHeight == 0 {
-		return false
-	}
-
-	// Account for description window
-	descriptionHeight := 15
-	podcastListHeight := v.screenHeight - descriptionHeight
-	if podcastListHeight < 5 {
-		podcastListHeight = v.screenHeight - 2
-	}
-	
-	visibleHeight := podcastListHeight - 4
-	if visibleHeight <= 0 {
-		return false
-	}
-
-	// Page size with one line overlap
-	pageSize := visibleHeight - 1
-	if pageSize < 1 {
-		pageSize = 1
-	}
-
-	// Move selection down by page size
-	newIdx := v.selectedIdx + pageSize
-	if newIdx >= len(v.getActivePodcasts()) {
-		newIdx = len(v.getActivePodcasts()) - 1
-	}
-
-	if newIdx != v.selectedIdx {
-		v.selectedIdx = newIdx
-		v.ensureVisible()
-		v.descScrollOffset = 0  // Reset description scroll when changing podcasts
+	if v.table.PageDown() {
+		v.descScrollOffset = 0
 		return true
 	}
 	return false
 }
 
-// HandlePageUp scrolls up by one page (vim Ctrl+B)
 func (v *PodcastListView) HandlePageUp() bool {
-	podcasts := v.getActivePodcasts()
-	if len(podcasts) == 0 || v.screenHeight == 0 {
-		return false
-	}
-
-	// Account for description window
-	descriptionHeight := 15
-	podcastListHeight := v.screenHeight - descriptionHeight
-	if podcastListHeight < 5 {
-		podcastListHeight = v.screenHeight - 2
-	}
-	
-	visibleHeight := podcastListHeight - 4
-	if visibleHeight <= 0 {
-		return false
-	}
-
-	// Page size with one line overlap
-	pageSize := visibleHeight - 1
-	if pageSize < 1 {
-		pageSize = 1
-	}
-
-	// Move selection up by page size
-	newIdx := v.selectedIdx - pageSize
-	if newIdx < 0 {
-		newIdx = 0
-	}
-
-	if newIdx != v.selectedIdx {
-		v.selectedIdx = newIdx
-		v.ensureVisible()
-		v.descScrollOffset = 0  // Reset description scroll when changing podcasts
+	if v.table.PageUp() {
+		v.descScrollOffset = 0
 		return true
 	}
 	return false
 }
 
-// getActivePodcasts returns either filtered podcasts or all podcasts based on search state
 func (v *PodcastListView) getActivePodcasts() []*models.Podcast {
 	if v.searchState.query != "" {
 		return v.filteredPodcasts
@@ -323,18 +261,15 @@ func (v *PodcastListView) getActivePodcasts() []*models.Podcast {
 	return v.podcasts
 }
 
-// applyFilter filters podcasts based on the current search query
 func (v *PodcastListView) applyFilter() {
-	// Clear match results
 	v.matchResults = make(map[string]PodcastMatchResult)
 	
 	if v.searchState.query == "" {
 		v.filteredPodcasts = v.podcasts
-		v.adjustSelectionAfterFilter()
+		v.updateTableRows()
 		return
 	}
 	
-	// Score and filter podcasts
 	type scoredPodcast struct {
 		podcast     *models.Podcast
 		score       int
@@ -344,7 +279,6 @@ func (v *PodcastListView) applyFilter() {
 	
 	var matched []scoredPodcast
 	for _, podcast := range v.podcasts {
-		// Use pre-converted description for searching
 		if matches, score, matchResult, matchField := v.searchState.MatchPodcastWithPositions(podcast.Title, podcast.ConvertedDescription); matches {
 			matched = append(matched, scoredPodcast{
 				podcast:     podcast,
@@ -355,74 +289,58 @@ func (v *PodcastListView) applyFilter() {
 		}
 	}
 	
-	// Sort by score (highest first)
 	sort.SliceStable(matched, func(i, j int) bool {
 		return matched[i].score > matched[j].score
 	})
 	
-	// Extract sorted podcasts and store match results
 	v.filteredPodcasts = make([]*models.Podcast, len(matched))
 	for i, m := range matched {
 		v.filteredPodcasts[i] = m.podcast
-		// Store match result by podcast URL (since podcast.ID is not set)
 		v.matchResults[m.podcast.URL] = PodcastMatchResult{
 			MatchResult: m.matchResult,
 			MatchField:  m.matchField,
 		}
 	}
 	
-	v.adjustSelectionAfterFilter()
+	v.updateTableRows()
 }
 
-// adjustSelectionAfterFilter ensures selection stays valid after filtering
-func (v *PodcastListView) adjustSelectionAfterFilter() {
+func (v *PodcastListView) updateTableRows() {
 	podcasts := v.getActivePodcasts()
-	if len(podcasts) == 0 {
-		v.selectedIdx = 0
-		v.scrollOffset = 0
-		return
+	rows := make([]TableRow, len(podcasts))
+	
+	for i, podcast := range podcasts {
+		var matchResult *PodcastMatchResult
+		if mr, ok := v.matchResults[podcast.URL]; ok {
+			matchResult = &mr
+		}
+		
+		rows[i] = &PodcastTableRow{
+			podcast:     podcast,
+			matchResult: matchResult,
+		}
 	}
 	
-	// When search query is active, always select the first result
-	if v.searchState.query != "" {
-		v.selectedIdx = 0
-		v.scrollOffset = 0
-		return
-	}
-	
-	// Ensure selection is within bounds
-	if v.selectedIdx >= len(podcasts) {
-		v.selectedIdx = len(podcasts) - 1
-	}
-	if v.selectedIdx < 0 {
-		v.selectedIdx = 0
-	}
-	v.ensureVisible()
+	v.table.SetRows(rows)
 }
 
-// GetSearchState returns the search state for external access
 func (v *PodcastListView) GetSearchState() *SearchState {
 	return v.searchState
 }
 
-// UpdateSearch updates the search and applies filtering
 func (v *PodcastListView) UpdateSearch() {
 	v.applyFilter()
 }
 
-// drawDescriptionWindow renders the description window at the bottom of the screen
+// drawDescriptionWindow renders the description window at the bottom
 func (v *PodcastListView) drawDescriptionWindow(s tcell.Screen, startY, width, height int) {
 	// Get the actual screen height to ensure we clear everything
 	_, screenHeight := s.Size()
 	
-	// Clear from startY to the bottom of the screen (not just the allocated height)
-	// Force tcell to update by using different runes and styles
+	// Clear from startY to the bottom of the screen
 	clearStyle := tcell.StyleDefault.Background(ColorBg).Foreground(ColorBg)
 	for y := startY; y < screenHeight; y++ {
 		for x := 0; x < width; x++ {
-			// First set to a different character to force update
-			s.SetContent(x, y, '\u00A0', nil, clearStyle) // Non-breaking space
-			// Then set to regular space
 			s.SetContent(x, y, ' ', nil, clearStyle)
 		}
 	}
@@ -432,7 +350,6 @@ func (v *PodcastListView) drawDescriptionWindow(s tcell.Screen, startY, width, h
 	description := ""
 	if selectedPodcast != nil {
 		description = selectedPodcast.ConvertedDescription
-		// Fall back to original if not converted yet
 		if description == "" {
 			description = selectedPodcast.Description
 		}
@@ -448,28 +365,19 @@ func (v *PodcastListView) drawDescriptionWindow(s tcell.Screen, startY, width, h
 	headerStyle := tcell.StyleDefault.Bold(true)
 	drawText(s, 0, startY+1, headerStyle, "Description")
 
-	// Draw description content with text wrapping
+	// Draw description content
 	if description != "" {
-		// Check if we have match positions for this podcast's description
 		var highlightPositions []int
 		if selectedPodcast != nil && v.searchState.query != "" {
-			// Check if the match was in the description
 			if matchResult, ok := v.matchResults[selectedPodcast.URL]; ok && matchResult.MatchField == "description" {
-				// Use the stored match positions directly
 				highlightPositions = matchResult.Positions
 			}
 		}
 
-		// Wrap text to fit width with padding
-		contentWidth := width - 2 // Leave 1 char padding on each side
-		// Since we're using pre-converted text, we don't have styles
-		// We could re-parse for styles if needed, but for now just display without styles
+		contentWidth := width - 2
 		wrappedLines := v.wrapStyledText(description, contentWidth, highlightPositions, nil)
 
-		// Draw description lines (limit to available height)
-		maxLines := height - 3 // Account for separator, header, and padding
-
-		// Ensure scroll offset doesn't exceed content
+		maxLines := height - 3
 		maxScrollOffset := len(wrappedLines) - maxLines
 		if maxScrollOffset < 0 {
 			maxScrollOffset = 0
@@ -478,18 +386,15 @@ func (v *PodcastListView) drawDescriptionWindow(s tcell.Screen, startY, width, h
 			v.descScrollOffset = maxScrollOffset
 		}
 
-		// Draw visible lines based on scroll offset
 		for i := 0; i < maxLines; i++ {
 			lineY := startY + 2 + i
 			lineIdx := i + v.descScrollOffset
 			
-			// Draw content if available
 			if lineIdx < len(wrappedLines) {
 				v.drawStyledLine(s, 1, lineY, contentWidth, wrappedLines[lineIdx])
 			}
 		}
 
-		// Show scroll indicators
 		if v.descScrollOffset > 0 || len(wrappedLines) > maxLines {
 			scrollStyle := tcell.StyleDefault.Foreground(ColorDimmed)
 			scrollInfo := fmt.Sprintf("[%d-%d/%d]", v.descScrollOffset+1, 
@@ -497,211 +402,46 @@ func (v *PodcastListView) drawDescriptionWindow(s tcell.Screen, startY, width, h
 			drawText(s, width-len(scrollInfo)-2, startY+1, scrollStyle, scrollInfo)
 		}
 	} else {
-		// Show placeholder when no description available
 		placeholderStyle := tcell.StyleDefault.Foreground(ColorDimmed)
 		drawText(s, 1, startY+2, placeholderStyle, "No description available")
 	}
 }
 
+// The following methods are copied from the original implementation to support description window
+// In a real refactor, these would be moved to a shared utility
 
-
-// wrapTextWithHighlights wraps text and preserves highlight positions
-func (v *PodcastListView) wrapTextWithHighlights(text string, width int, highlightPositions []int) []lineWithHighlights {
-	if width <= 0 {
-		return []lineWithHighlights{}
-	}
-
-	// Create a map for quick highlight position lookup
-	highlightMap := make(map[int]bool)
-	for _, pos := range highlightPositions {
-		highlightMap[pos] = true
-	}
-
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return []lineWithHighlights{}
-	}
-
-	var lines []lineWithHighlights
-	var currentLine strings.Builder
-	var currentPositions []int
-
-	// Find word positions in the text (as rune positions)
-	wordPositions := make([]int, len(words))
-	runePos := 0
-	textRunes := []rune(text)
-	
-	for i, word := range words {
-		// Find the word starting from current position
-		wordRunes := []rune(word)
-		found := false
-		
-		for j := runePos; j <= len(textRunes)-len(wordRunes); j++ {
-			if string(textRunes[j:j+len(wordRunes)]) == word {
-				wordPositions[i] = j
-				runePos = j + len(wordRunes)
-				found = true
-				break
-			}
-		}
-		
-		if !found {
-			// Shouldn't happen with properly split words
-			wordPositions[i] = runePos
-		}
-	}
-
-	for wordIdx, word := range words {
-		wordStartPos := wordPositions[wordIdx]
-		
-		// Check if adding this word would exceed the width
-		currentLineRuneCount := len([]rune(currentLine.String()))
-		wordRuneCount := len([]rune(word))
-		if currentLineRuneCount > 0 && currentLineRuneCount+1+wordRuneCount > width {
-			// Start a new line
-			lines = append(lines, lineWithHighlights{
-				text:      currentLine.String(),
-				positions: currentPositions,
-			})
-			currentLine.Reset()
-			currentPositions = nil
-		}
-
-		// Add space before word (if not first word)
-		lineOffset := len([]rune(currentLine.String()))
-		if currentLine.Len() > 0 {
-			currentLine.WriteString(" ")
-			lineOffset++
-		}
-
-		// Add word to current line
-		currentLine.WriteString(word)
-
-		// Map highlight positions for this word
-		wordRunes := []rune(word)
-		for i := 0; i < len(wordRunes); i++ {
-			origPos := wordStartPos + i
-			if highlightMap[origPos] {
-				currentPositions = append(currentPositions, lineOffset+i)
-			}
-		}
-
-		// Handle very long words that exceed width
-		if len([]rune(currentLine.String())) > width {
-			lines = append(lines, lineWithHighlights{
-				text:      currentLine.String(),
-				positions: currentPositions,
-			})
-			currentLine.Reset()
-			currentPositions = nil
-		}
-	}
-
-	// Add the last line if it has content
-	if currentLine.Len() > 0 {
-		lines = append(lines, lineWithHighlights{
-			text:      currentLine.String(),
-			positions: currentPositions,
-		})
-	}
-
-	return lines
-}
-
-// drawLineWithHighlights draws a single line with highlighted positions
-func (v *PodcastListView) drawLineWithHighlights(s tcell.Screen, x, y, maxWidth int, style, highlightStyle tcell.Style, line lineWithHighlights) {
-	// Create highlight map for this line
-	highlightMap := make(map[int]bool)
-	for _, pos := range line.positions {
-		highlightMap[pos] = true
-	}
-
-	// Convert to runes for proper positioning
-	runes := []rune(line.text)
-	
-	// Draw each character with appropriate style
-	screenPos := 0
-	for runeIdx, r := range runes {
-		if screenPos >= maxWidth {
-			break
-		}
-		
-		charStyle := style
-		if highlightMap[runeIdx] {
-			charStyle = highlightStyle
-		}
-		
-		s.SetContent(x+screenPos, y, r, nil, charStyle)
-		screenPos++
-	}
-	
-	// Pad the rest of the line
-	for i := screenPos; i < maxWidth; i++ {
-		s.SetContent(x+i, y, ' ', nil, style)
-	}
-}
-
-// styledLineWithHighlights represents a line with both styling and highlight information
-type styledLineWithHighlights struct {
-	text      string
-	positions []int  // Highlight positions
-	styles    []markdown.StyleRange  // Style ranges that apply to this line
-}
-
-// splitPreservingNewlines splits text into lines, preserving empty lines
-func splitPreservingNewlines(text string) []string {
-	// Handle empty string case
-	if text == "" {
-		return []string{""}
-	}
-	
-	// Split by newline but preserve the structure
-	lines := strings.Split(text, "\n")
-	return lines
-}
-
-// wrapStyledText wraps styled text while preserving both styles and highlight positions
 func (v *PodcastListView) wrapStyledText(text string, width int, highlightPositions []int, styles []markdown.StyleRange) []styledLineWithHighlights {
 	if width <= 0 {
 		return []styledLineWithHighlights{}
 	}
 
-	// Create highlight map
 	highlightMap := make(map[int]bool)
 	for _, pos := range highlightPositions {
 		highlightMap[pos] = true
 	}
 
-	// Split text by newlines first to preserve paragraph breaks
 	paragraphs := splitPreservingNewlines(text)
 	var allLines []styledLineWithHighlights
-	globalRunePos := 0 // Track position across entire text
+	globalRunePos := 0
 	
 	for paragraphIdx, paragraph := range paragraphs {
-		// Handle empty lines (preserve them)
 		if paragraph == "" {
 			allLines = append(allLines, styledLineWithHighlights{
 				text:      "",
 				positions: nil,
 				styles:    nil,
 			})
-			// Account for the newline character if not the last paragraph
 			if paragraphIdx < len(paragraphs)-1 {
 				globalRunePos++
 			}
 			continue
 		}
 		
-		// Process non-empty paragraph
 		paragraphRunes := []rune(paragraph)
-		
-		// Wrap this paragraph
 		paragraphLines := v.wrapParagraphWithStyles(paragraph, width, globalRunePos, highlightMap, styles)
 		allLines = append(allLines, paragraphLines...)
 		
-		// Update global position
 		globalRunePos += len(paragraphRunes)
-		// Account for the newline character if not the last paragraph
 		if paragraphIdx < len(paragraphs)-1 {
 			globalRunePos++
 		}
@@ -710,7 +450,6 @@ func (v *PodcastListView) wrapStyledText(text string, width int, highlightPositi
 	return allLines
 }
 
-// wrapParagraphWithStyles wraps a single paragraph preserving styles and highlights
 func (v *PodcastListView) wrapParagraphWithStyles(paragraph string, width int, paragraphStartPos int, highlightMap map[int]bool, styles []markdown.StyleRange) []styledLineWithHighlights {
 	words := strings.Fields(paragraph)
 	if len(words) == 0 {
@@ -722,13 +461,11 @@ func (v *PodcastListView) wrapParagraphWithStyles(paragraph string, width int, p
 	var currentHighlights []int
 	var currentStyles []markdown.StyleRange
 
-	// Find word positions in the paragraph (as rune positions)
 	wordPositions := make([]int, len(words))
 	runePos := 0
 	paragraphRunes := []rune(paragraph)
 	
 	for i, word := range words {
-		// Find the word starting from current position
 		wordRunes := []rune(word)
 		found := false
 		
@@ -750,11 +487,9 @@ func (v *PodcastListView) wrapParagraphWithStyles(paragraph string, width int, p
 		wordStartPosInParagraph := wordPositions[wordIdx]
 		wordStartPosGlobal := paragraphStartPos + wordStartPosInParagraph
 		
-		// Check if adding this word would exceed the width
 		currentLineRuneCount := len([]rune(currentLine.String()))
 		wordRuneCount := len([]rune(word))
 		if currentLineRuneCount > 0 && currentLineRuneCount+1+wordRuneCount > width {
-			// Start a new line
 			lines = append(lines, styledLineWithHighlights{
 				text:      currentLine.String(),
 				positions: currentHighlights,
@@ -765,17 +500,14 @@ func (v *PodcastListView) wrapParagraphWithStyles(paragraph string, width int, p
 			currentStyles = nil
 		}
 
-		// Add space before word (if not first word)
 		lineOffset := len([]rune(currentLine.String()))
 		if currentLine.Len() > 0 {
 			currentLine.WriteString(" ")
 			lineOffset++
 		}
 
-		// Add word to current line
 		currentLine.WriteString(word)
 
-		// Map highlight positions for this word
 		wordRunes := []rune(word)
 		for i := 0; i < len(wordRunes); i++ {
 			globalPos := wordStartPosGlobal + i
@@ -784,17 +516,14 @@ func (v *PodcastListView) wrapParagraphWithStyles(paragraph string, width int, p
 			}
 		}
 
-		// Find styles that apply to this word
 		for _, style := range styles {
 			if style.Start <= wordStartPosGlobal && style.End > wordStartPosGlobal {
-				// This style applies to at least part of this word
 				lineStyle := markdown.StyleRange{
 					Start: lineOffset,
 					End:   lineOffset + wordRuneCount,
 					Type:  style.Type,
 				}
 				
-				// Adjust if style starts or ends within the word
 				if style.Start > wordStartPosGlobal {
 					lineStyle.Start = lineOffset + (style.Start - wordStartPosGlobal)
 				}
@@ -806,7 +535,6 @@ func (v *PodcastListView) wrapParagraphWithStyles(paragraph string, width int, p
 			}
 		}
 
-		// Handle very long words that exceed width
 		if len([]rune(currentLine.String())) > width {
 			lines = append(lines, styledLineWithHighlights{
 				text:      currentLine.String(),
@@ -819,7 +547,6 @@ func (v *PodcastListView) wrapParagraphWithStyles(paragraph string, width int, p
 		}
 	}
 
-	// Add the last line if it has content
 	if currentLine.Len() > 0 {
 		lines = append(lines, styledLineWithHighlights{
 			text:      currentLine.String(),
@@ -831,31 +558,23 @@ func (v *PodcastListView) wrapParagraphWithStyles(paragraph string, width int, p
 	return lines
 }
 
-// drawStyledLine draws a line with both styles and highlights
 func (v *PodcastListView) drawStyledLine(s tcell.Screen, x, y, maxWidth int, line styledLineWithHighlights) {
-	// Create highlight map for this line
 	highlightMap := make(map[int]bool)
 	for _, pos := range line.positions {
 		highlightMap[pos] = true
 	}
 
-	// Convert to runes for proper positioning
 	runes := []rune(line.text)
-	
-	// Default styles
 	defaultStyle := tcell.StyleDefault.Foreground(ColorFg)
 	
-	// Draw each character with appropriate style
 	screenPos := 0
 	for runeIdx, r := range runes {
 		if screenPos >= maxWidth {
 			break
 		}
 		
-		// Start with default style
 		charStyle := defaultStyle
 		
-		// Apply any styles that cover this position
 		for _, styleRange := range line.styles {
 			if runeIdx >= styleRange.Start && runeIdx < styleRange.End {
 				charStyle = GetTcellStyle(styleRange.Type)
@@ -863,9 +582,7 @@ func (v *PodcastListView) drawStyledLine(s tcell.Screen, x, y, maxWidth int, lin
 			}
 		}
 		
-		// Apply highlight if needed (highlight takes precedence)
 		if highlightMap[runeIdx] {
-			// Preserve existing formatting but add highlight color
 			charStyle = charStyle.Foreground(ColorHighlight).Bold(true)
 		}
 		
@@ -873,9 +590,7 @@ func (v *PodcastListView) drawStyledLine(s tcell.Screen, x, y, maxWidth int, lin
 		screenPos++
 	}
 	
-	// Pad the rest of the line
 	for i := screenPos; i < maxWidth; i++ {
 		s.SetContent(x+i, y, ' ', nil, defaultStyle)
 	}
 }
-

@@ -20,6 +20,9 @@ A terminal-based podcast manager with vim-style keybindings, built with Go and t
 - Fuzzy search with highlighting for both podcasts and episodes
 - Real-time playback position updates in the episode list
 - Automatic position saving and resume functionality
+- Episode queue management with auto-advance playback
+- Queue view showing podcast titles and playback controls
+- Flexible navigation between podcast, episode, and queue views
 
 ## Requirements
 
@@ -38,7 +41,11 @@ A terminal-based podcast manager with vim-style keybindings, built with Go and t
 - `j` / `k` - Move down/up in lists
 - `Ctrl+F` / `Ctrl+B` - Page down/up in lists
 - `h` / `l` - Switch between podcast and episode views
-- `Enter` - Select item (same as `l` when on podcast, plays episode when on episode)
+- `p` - Go to podcast view (from episode/queue view)
+- `e` - Go to episode view (from podcast/queue view)
+- `q` - Go to queue view (from podcast/episode view)
+- `Tab` - Toggle queue view / return to previous view
+- `Enter` - Select item (same as `l`; adds to queue in episode view)
 - `g` - Go to top of list
 - `G` - Go to bottom of list
 - `Alt+j` / `Alt+k` - Scroll down/up in the description window (episode view)
@@ -46,17 +53,17 @@ A terminal-based podcast manager with vim-style keybindings, built with Go and t
 **Episode View Layout**: When viewing episodes, the screen is split with the episode list on top and a description window at the bottom showing details of the currently selected episode. The description window automatically converts markdown/HTML to readable terminal text.
 
 **Episode Status Indicators**:
+- `Q:1`, `Q:2` - Queue position
 - `▶` - Currently playing episode (highlighted with green text)
 - `⏸` - Currently paused episode (highlighted with yellow text)
 - `✔` - Downloaded episode
 - `[⬇50%]` - Downloading (with progress percentage)
 - `[⏸]` - Download queued
-- `[✗]` - Download failed
+- `[⚠]` - Download failed
 - Position format: `15:30/45:00` (current position/total duration)
 
 ### Playback Control
 - `Space` - Play/pause current episode
-- `Enter` - Play selected episode (resume from saved position)
 - `s` - Stop playback
 - `R` - Restart episode from beginning (reset position to 0:00)
 - `f` - Seek forward 30 seconds
@@ -98,15 +105,28 @@ A terminal-based podcast manager with vim-style keybindings, built with Go and t
 - `Alt+D` - Delete word after cursor
 - `Ctrl+D` / `Delete` - Delete character at cursor
 
+### Queue Management
+- `Enter` / `l` - Add episode to queue (from episode list)
+- `u` - Remove episode from queue (from episode/queue view)
+- `Enter` - Play episode immediately (from queue view)
+- `g` - Go to episode in episode list (from queue view)
+- `Alt+j` - Move episode down in queue (from queue view)
+- `Alt+k` - Move episode up in queue (from queue view)
+- `R` - Restart episode from beginning (from queue view)
+- `0`-`9` - Seek to 0%-90% of episode (from queue view)
+
+**Note**: First episode added to empty queue starts playing automatically. Episodes play sequentially; completed episodes are removed from queue. Auto-advances to next episode when one completes.
+
 ### Other
 - `:` - Enter command mode
 - `?` - Show help dialog
 - `Esc` - Return to normal mode / close dialogs
-- `q` - Quit application
+- `Q` - Quit application (uppercase Q required)
 
 ### Command Mode
 - `:add <feed-url>` - Add a new podcast subscription
-- `:q` or `:quit` - Quit the application
+- `:q` - Go to queue view (from podcast/episode view)
+- `:Q` or `:quit` - Quit the application
 
 ## Building
 

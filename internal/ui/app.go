@@ -90,7 +90,7 @@ func (a *App) Run() error {
 	if err := s.Init(); err != nil {
 		return err
 	}
-	
+
 	// Ensure cleanup happens in the correct order
 	defer func() {
 		// First stop the event loop by closing quit channel if not already closed
@@ -100,13 +100,13 @@ func (a *App) Run() error {
 		default:
 			close(a.quit)
 		}
-		
+
 		// Perform shutdown
 		a.shutdown()
-		
+
 		// Finally clean up the screen
 		s.Fini()
-		
+
 		// Handle any panic
 		if r := recover(); r != nil {
 			log.Printf("Panic during shutdown: %v", r)
@@ -140,7 +140,7 @@ func (a *App) Run() error {
 	a.episodes = NewEpisodeListView()
 	a.episodes.SetSubscriptions(subs)
 	a.episodes.SetDownloadManager(a.downloadManager) // Pass download manager to episode list
-	a.episodes.SetPlayer(a.player) // Pass player to episode list
+	a.episodes.SetPlayer(a.player)                   // Pass player to episode list
 	a.queue = NewQueueView()
 	a.queue.SetSubscriptions(subs)
 	a.queue.SetDownloadManager(a.downloadManager)
@@ -179,13 +179,13 @@ func (a *App) shutdown() {
 	// Prevent multiple shutdowns
 	a.shutdownOnce.Do(func() {
 		log.Println("Shutting down podcast-tui...")
-		
+
 		// Save current episode position one final time
 		a.saveEpisodePosition()
-		
+
 		// Stop position ticker
 		a.stopPositionTicker()
-		
+
 		// Stop the player and ensure mpv process is terminated
 		if a.player != nil {
 			log.Println("Stopping player...")
@@ -195,7 +195,7 @@ func (a *App) shutdown() {
 			// Ensure complete cleanup
 			a.player.Cleanup()
 		}
-		
+
 		// Stop download manager
 		if a.downloadManager != nil {
 			log.Println("Stopping download manager...")
@@ -303,7 +303,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 					return true
 				}
 			}
-			
+
 			switch ev.Rune() {
 			case 'Q':
 				// Quit application (capital Q)
@@ -363,28 +363,9 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 					}
 				}
 			case 'g':
-				if a.currentView == a.queue {
-					// Navigate to episode in episode list
-					if episode := a.queue.GetSelected(); episode != nil {
-						// Find the podcast containing this episode
-						podcast := a.subscriptions.GetPodcastForEpisode(episode.ID)
-						if podcast != nil {
-							// Switch to episode view with this podcast
-							a.episodes.SetPodcast(podcast)
-							a.currentView = a.episodes
-							
-							// Find and select the episode in the list
-							a.selectEpisodeInList(episode.ID)
-							
-							a.statusMessage = "Navigated to episode in list"
-							return true
-						}
-					}
-				} else {
-					// Clear status message when navigating
-					a.clearStatusMessage()
-					return a.currentView.HandleKey(ev)
-				}
+				// Clear status message when navigating
+				a.clearStatusMessage()
+				return a.currentView.HandleKey(ev)
 			case 'G':
 				// Clear status message when navigating
 				a.clearStatusMessage()
@@ -392,7 +373,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 			case ' ':
 				// Space bar for play/pause ONLY (not for starting new episodes)
 				playerState := a.player.GetState()
-				
+
 				if playerState != player.StateStopped {
 					// Player is active, toggle pause
 					go func() {
@@ -423,7 +404,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 					go func() {
 						position, _ := a.player.GetPosition()
 						duration, _ := a.player.GetDuration()
-						
+
 						if err := a.player.Seek(30); err != nil {
 							a.statusMessage = "Seek error: " + err.Error()
 						} else if duration > 0 && position+30*time.Second > duration {
@@ -437,7 +418,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				if a.player.GetState() != player.StateStopped {
 					go func() {
 						position, _ := a.player.GetPosition()
-						
+
 						if err := a.player.Seek(-30); err != nil {
 							a.statusMessage = "Seek error: " + err.Error()
 						} else if position < 30*time.Second {
@@ -623,7 +604,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 					if err == nil && duration > 0 {
 						percentage := float64(ev.Rune()-'0') / 10.0
 						targetSeconds := int(duration.Seconds() * percentage)
-						
+
 						go func() {
 							// Use absolute seeking for percentage-based positions
 							if err := a.player.SeekAbsolute(targetSeconds); err != nil {
@@ -631,7 +612,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 							} else {
 								// Format time display
 								targetTime := time.Duration(targetSeconds) * time.Second
-								a.statusMessage = fmt.Sprintf("Seeking to %d%% (%s)", 
+								a.statusMessage = fmt.Sprintf("Seeking to %d%% (%s)",
 									int(percentage*100), a.formatTime(targetTime))
 							}
 						}()
@@ -717,7 +698,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				go func() {
 					position, _ := a.player.GetPosition()
 					duration, _ := a.player.GetDuration()
-					
+
 					if err := a.player.Seek(10); err != nil {
 						a.statusMessage = "Seek error: " + err.Error()
 					} else if duration > 0 && position+10*time.Second > duration {
@@ -731,7 +712,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 			if a.player.GetState() != player.StateStopped {
 				go func() {
 					position, _ := a.player.GetPosition()
-					
+
 					if err := a.player.Seek(-10); err != nil {
 						a.statusMessage = "Seek error: " + err.Error()
 					} else if position < 10*time.Second {
@@ -819,7 +800,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 		// Handle search mode with emacs-style editing
 		var searchState *SearchState
 		var updateFunc func()
-		
+
 		if a.currentView == a.episodes {
 			searchState = a.episodes.GetSearchState()
 			updateFunc = a.episodes.UpdateSearch
@@ -831,9 +812,9 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 			a.mode = ModeNormal
 			return true
 		}
-		
+
 		prevQuery := searchState.query
-		
+
 		switch ev.Key() {
 		case tcell.KeyEscape, tcell.KeyEnter:
 			// Exit search mode but keep filter active
@@ -910,7 +891,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				searchState.InsertChar(ev.Rune())
 			}
 		}
-		
+
 		// Update command line display and apply filter if query changed
 		a.commandLine = searchState.query
 		if searchState.query != prevQuery {
@@ -931,7 +912,7 @@ func (a *App) draw() {
 			a.screen.SetContent(x, y, ' ', nil, style)
 		}
 	}
-	
+
 	a.currentView.Draw(a.screen)
 	a.drawStatusBar()
 
@@ -948,7 +929,7 @@ func (a *App) handleProgress() {
 	saveCounter := 0
 	var lastEpisodeID string
 	completionTriggered := false
-	
+
 	for progress := range a.player.Progress() {
 		// Don't redraw the entire screen - just update the status bar
 		// The position ticker handles updating the episode list view
@@ -966,18 +947,18 @@ func (a *App) handleProgress() {
 			// Log progress for debugging
 			percentComplete := float64(progress.Position) / float64(progress.Duration) * 100
 			timeRemaining := progress.Duration - progress.Position
-			
+
 			// Log every 10 seconds when near the end
 			if timeRemaining < 30*time.Second && saveCounter%10 == 0 {
-				log.Printf("Episode progress: %.1f%% complete, %v remaining (pos: %v, dur: %v)", 
+				log.Printf("Episode progress: %.1f%% complete, %v remaining (pos: %v, dur: %v)",
 					percentComplete, timeRemaining, progress.Position, progress.Duration)
 			}
-			
+
 			if progress.Position >= progress.Duration {
 				// Episode has ended
-				log.Printf("Episode completion detected! Position: %v, Duration: %v", 
+				log.Printf("Episode completion detected! Position: %v, Duration: %v",
 					progress.Position, progress.Duration)
-				
+
 				// Check if there's a next episode in queue
 				if nextEpisode := a.subscriptions.GetNextInQueue(); nextEpisode != nil {
 					log.Printf("Next episode in queue: %s", nextEpisode.Title)
@@ -1034,25 +1015,25 @@ func (a *App) formatPlayerStatus(width int) string {
 
 	// Build status with podcast and episode info
 	var statusParts []string
-	
+
 	// Add podcast and episode titles if available
 	if a.currentPodcast != nil && a.currentEpisode != nil {
 		podcastTitle := a.currentPodcast.Title
 		episodeTitle := a.currentEpisode.Title
-		
+
 		// Truncate titles based on available width
 		maxTitleWidth := width / 3 // Reserve about 1/3 of width for titles
 		if maxTitleWidth < 20 {
 			maxTitleWidth = 20
 		}
-		
+
 		if len(podcastTitle) > maxTitleWidth {
 			podcastTitle = podcastTitle[:maxTitleWidth-3] + "..."
 		}
 		if len(episodeTitle) > maxTitleWidth {
 			episodeTitle = episodeTitle[:maxTitleWidth-3] + "..."
 		}
-		
+
 		statusParts = append(statusParts, fmt.Sprintf("%s: %s", podcastTitle, episodeTitle))
 	}
 
@@ -1107,7 +1088,7 @@ func (a *App) drawStatusBar() {
 	}
 
 	drawText(a.screen, 0, h-1, style, modeStr)
-	
+
 	// Draw cursor for search mode
 	if a.mode == ModeSearch {
 		var searchState *SearchState
@@ -1116,7 +1097,7 @@ func (a *App) drawStatusBar() {
 		} else if a.currentView == a.podcasts {
 			searchState = a.podcasts.GetSearchState()
 		}
-		
+
 		if searchState != nil {
 			cursorX := 1 + searchState.cursorPos // 1 for the "/" prefix
 			cursorStyle := style.Reverse(true)
@@ -1166,24 +1147,24 @@ func drawTextWithHighlight(s tcell.Screen, x, y, maxWidth int, style tcell.Style
 	for _, pos := range highlightPositions {
 		highlightMap[pos] = true
 	}
-	
+
 	highlightStyle := style.Foreground(ColorHighlight).Bold(true)
-	
+
 	// Convert text to runes for proper Unicode handling
 	runes := []rune(text)
-	
+
 	// Draw the text with highlights
 	screenPos := 0
 	for runeIdx, r := range runes {
 		if screenPos >= maxWidth {
 			break
 		}
-		
+
 		charStyle := style
 		if highlightMap[runeIdx] {
 			charStyle = highlightStyle
 		}
-		
+
 		s.SetContent(x+screenPos, y, r, nil, charStyle)
 		screenPos++
 	}
@@ -1224,7 +1205,7 @@ func (a *App) executeCommand() {
 func (a *App) addPodcast(url string) {
 	a.statusMessage = "Adding podcast..."
 	a.draw() // Show status immediately
-	
+
 	podcast, err := feed.ParseFeed(url)
 	if err != nil {
 		a.statusMessage = "Error: " + err.Error()
@@ -1305,7 +1286,7 @@ func (a *App) refreshFeeds() {
 		a.statusMessage = fmt.Sprintf("Refreshed %d/%d feeds (%d failed)",
 			successCount, totalPodcasts, failedCount)
 	}
-	
+
 	// Update UI to show refreshed episode counts
 	a.draw()
 }
@@ -1320,18 +1301,18 @@ func (a *App) refreshSinglePodcast(podcast *models.Podcast) {
 		a.draw()
 		return
 	}
-	
+
 	// Merge the updated data
 	a.mergePodcastData(podcast, updated)
-	
+
 	// Save subscriptions
 	if err := a.subscriptions.Save(); err != nil {
 		log.Printf("Failed to save subscriptions: %v", err)
 	}
-	
+
 	// Update the episode list view with the refreshed podcast
 	a.episodes.SetPodcast(podcast)
-	
+
 	// Update status and redraw
 	a.statusMessage = fmt.Sprintf("%s refreshed successfully", podcast.Title)
 	a.draw()
@@ -1341,12 +1322,12 @@ func (a *App) saveEpisodePosition() {
 	if a.currentEpisode != nil && a.player.GetState() != player.StateStopped {
 		if position, err := a.player.GetPosition(); err == nil {
 			log.Printf("Saving position for episode '%s': %v", a.currentEpisode.Title, position)
-			
+
 			// Find and update the episode in the actual subscription data using the index
 			if episode := a.subscriptions.GetEpisodeByID(a.currentEpisode.ID); episode != nil {
 				// Update the canonical episode in subscriptions
 				episode.Position = position
-				
+
 				// Update duration if it's unknown or different from actual
 				if duration, err := a.player.GetDuration(); err == nil && duration > 0 {
 					// Check if duration is significantly different (more than 1 second difference)
@@ -1354,22 +1335,22 @@ func (a *App) saveEpisodePosition() {
 					if durationDiff < 0 {
 						durationDiff = -durationDiff
 					}
-					
+
 					if episode.Duration == 0 || durationDiff > time.Second {
-						log.Printf("Updating duration for episode '%s': %v -> %v", 
+						log.Printf("Updating duration for episode '%s': %v -> %v",
 							episode.Title, episode.Duration, duration)
 						episode.Duration = duration
-						
+
 						// Update the duration in the episode list directly
 						a.episodes.UpdateEpisodeDuration(episode.ID, duration)
-						
+
 						// Also update our local reference
 						a.currentEpisode.Duration = duration
-						
+
 						// Update the episode list view's reference
 						a.episodes.SetCurrentEpisode(a.currentEpisode)
 						a.queue.SetCurrentEpisode(a.currentEpisode)
-						
+
 						// Immediately update the UI to show the new duration
 						if a.currentView == a.episodes {
 							a.episodes.UpdateCurrentEpisodePosition(a.screen)
@@ -1377,7 +1358,7 @@ func (a *App) saveEpisodePosition() {
 						}
 					}
 				}
-				
+
 				// Mark as played if >95% complete
 				if duration, err := a.player.GetDuration(); err == nil && duration > 0 {
 					progressPercent := float64(position) / float64(duration)
@@ -1385,7 +1366,7 @@ func (a *App) saveEpisodePosition() {
 						episode.Played = true
 					}
 				}
-				
+
 				// Also update our local reference
 				a.currentEpisode.Position = position
 				if episode.Played {
@@ -1408,16 +1389,16 @@ func (a *App) stopCurrentEpisode() {
 	if a.player.GetState() == player.StateStopped {
 		return // Already stopped
 	}
-	
+
 	a.statusMessage = "Stopping..."
 	a.draw() // Show status immediately
-	
+
 	// Save position before stopping
 	a.saveEpisodePosition()
-	
+
 	// Stop position ticker
 	a.stopPositionTicker()
-	
+
 	// Stop playback but keep mpv idle for instant resume
 	if err := a.player.StopKeepIdle(); err != nil {
 		log.Printf("Error stopping player: %v", err)
@@ -1425,13 +1406,13 @@ func (a *App) stopCurrentEpisode() {
 	} else {
 		a.statusMessage = "Stopped"
 	}
-	
+
 	// Clear current episode state
 	a.currentEpisode = nil
 	a.currentPodcast = nil
 	a.episodes.SetCurrentEpisode(nil)
 	a.queue.SetCurrentEpisode(nil)
-	
+
 	// Redraw to clear episode highlighting
 	a.draw()
 }
@@ -1439,7 +1420,7 @@ func (a *App) stopCurrentEpisode() {
 func (a *App) playEpisode(episode *models.Episode) {
 	log.Printf("playEpisode called for: %s", episode.Title)
 	log.Printf("Episode position at start of playEpisode: %v", episode.Position)
-	
+
 	// Save position of current episode if switching
 	if a.currentEpisode != nil && a.currentEpisode.ID != episode.ID {
 		a.saveEpisodePosition()
@@ -1447,7 +1428,7 @@ func (a *App) playEpisode(episode *models.Episode) {
 
 	// Find the canonical episode in subscription data using the index
 	canonicalEpisode := a.subscriptions.GetEpisodeByID(episode.ID)
-	
+
 	// Use the canonical episode if found, otherwise use the provided one
 	if canonicalEpisode != nil {
 		a.currentEpisode = canonicalEpisode
@@ -1492,12 +1473,12 @@ func (a *App) playEpisode(episode *models.Episode) {
 		}
 	}
 	a.draw() // Show status immediately
-	
+
 	// Use comprehensive download check to get latest state
 	var playURL string
 	log.Printf("Checking download status for episode: %s", episode.Title)
 	log.Printf("Episode.Downloaded: %v, Episode.DownloadPath: %s", episode.Downloaded, episode.DownloadPath)
-	
+
 	var isLocal bool
 	if a.downloadManager.IsEpisodeDownloaded(episode, podcastTitle) && episode.DownloadPath != "" {
 		// Verify file exists and is valid
@@ -1536,7 +1517,7 @@ func (a *App) playEpisode(episode *models.Episode) {
 
 	// Update last played timestamp
 	episode.LastPlayed = time.Now()
-	
+
 	// Redraw to update episode highlighting now that player state has changed
 	a.draw()
 
@@ -1549,38 +1530,38 @@ func (a *App) playEpisode(episode *models.Episode) {
 			// Wait for mpv to fully load the file
 			maxWaitTime := 5 * time.Second
 			startTime := time.Now()
-			
+
 			// Wait until player reports a valid duration (indicates file is loaded)
 			for time.Since(startTime) < maxWaitTime {
 				if duration, err := a.player.GetDuration(); err == nil && duration > 0 {
 					log.Printf("File loaded, duration: %v", duration)
-					
+
 					// Update episode duration if it's unknown or different
 					durationDiff := a.currentEpisode.Duration - duration
 					if durationDiff < 0 {
 						durationDiff = -durationDiff
 					}
-					
+
 					if a.currentEpisode.Duration == 0 || durationDiff > time.Second {
-						log.Printf("Updating duration for episode '%s': %v -> %v", 
+						log.Printf("Updating duration for episode '%s': %v -> %v",
 							a.currentEpisode.Title, a.currentEpisode.Duration, duration)
-						
+
 						// Update the episode in the actual subscription data using the index
 						if ep := a.subscriptions.GetEpisodeByID(a.currentEpisode.ID); ep != nil {
 							ep.Duration = duration
 						}
-						
+
 						a.currentEpisode.Duration = duration
-						
+
 						// Update the duration in the episode list directly
 						a.episodes.UpdateEpisodeDuration(a.currentEpisode.ID, duration)
-						
+
 						// Immediately update the UI to show the new duration
 						if a.currentView == a.episodes {
 							a.episodes.UpdateCurrentEpisodePosition(a.screen)
 							a.screen.Show()
 						}
-						
+
 						// Save immediately to persist the duration
 						go func() {
 							if err := a.subscriptions.Save(); err != nil {
@@ -1592,14 +1573,14 @@ func (a *App) playEpisode(episode *models.Episode) {
 				}
 				time.Sleep(100 * time.Millisecond)
 			}
-			
+
 			// Additional small delay to ensure mpv is ready for seeking
 			time.Sleep(200 * time.Millisecond)
 
 			// Seek to saved position
 			seekSeconds := int(resumePosition.Seconds())
 			log.Printf("Attempting to seek to position: %d seconds (%v)", seekSeconds, resumePosition)
-			
+
 			// Try seeking multiple times if it fails initially
 			var err error
 			for attempts := 0; attempts < 3; attempts++ {
@@ -1617,7 +1598,7 @@ func (a *App) playEpisode(episode *models.Episode) {
 				log.Printf("Seek attempt %d failed: %v", attempts+1, err)
 				time.Sleep(500 * time.Millisecond)
 			}
-			
+
 			if err != nil {
 				log.Printf("Failed to resume from position after 3 attempts: %v", err)
 				a.statusMessage = "Failed to resume from saved position"
@@ -1629,23 +1610,23 @@ func (a *App) playEpisode(episode *models.Episode) {
 		log.Printf("Not resuming - Position: %v (either 0 or > 24h)", episode.Position)
 		// Start position ticker immediately if no resume needed
 		a.startPositionTicker()
-		
+
 		// Check and update duration for episodes starting from beginning
 		go func() {
 			// Wait a bit for the player to load the file
 			time.Sleep(500 * time.Millisecond)
-			
+
 			if duration, err := a.player.GetDuration(); err == nil && duration > 0 {
 				// Check if duration is significantly different
 				durationDiff := a.currentEpisode.Duration - duration
 				if durationDiff < 0 {
 					durationDiff = -durationDiff
 				}
-				
+
 				if a.currentEpisode.Duration == 0 || durationDiff > time.Second {
-					log.Printf("Updating duration for episode '%s': %v -> %v", 
+					log.Printf("Updating duration for episode '%s': %v -> %v",
 						a.currentEpisode.Title, a.currentEpisode.Duration, duration)
-					
+
 					// Update the episode in the actual subscription data
 					for _, podcast := range a.subscriptions.Podcasts {
 						for _, ep := range podcast.Episodes {
@@ -1655,21 +1636,21 @@ func (a *App) playEpisode(episode *models.Episode) {
 							}
 						}
 					}
-					
+
 					a.currentEpisode.Duration = duration
-					
+
 					// Update the duration in the episode list directly
 					a.episodes.UpdateEpisodeDuration(a.currentEpisode.ID, duration)
-					
+
 					// Update the episode list view's reference
 					a.episodes.SetCurrentEpisode(a.currentEpisode)
-					
+
 					// Immediately update the UI to show the new duration
 					if a.currentView == a.episodes {
 						a.episodes.UpdateCurrentEpisodePosition(a.screen)
 						a.screen.Show()
 					}
-					
+
 					// Save immediately to persist the duration
 					if err := a.subscriptions.Save(); err != nil {
 						log.Printf("Failed to save episode duration: %v", err)
@@ -1693,7 +1674,7 @@ func (a *App) restartEpisode(episode *models.Episode) {
 
 	// Find the canonical episode in subscription data using the index
 	canonicalEpisode := a.subscriptions.GetEpisodeByID(episode.ID)
-	
+
 	// Use the canonical episode if found, otherwise use the provided one
 	if canonicalEpisode != nil {
 		a.currentEpisode = canonicalEpisode
@@ -1761,7 +1742,7 @@ func (a *App) restartEpisode(episode *models.Episode) {
 
 	// Update last played timestamp
 	episode.LastPlayed = time.Now()
-	
+
 	// Redraw to update episode highlighting now that player state has changed
 	a.draw()
 
@@ -1769,7 +1750,7 @@ func (a *App) restartEpisode(episode *models.Episode) {
 	if err := a.subscriptions.Save(); err != nil {
 		log.Printf("Failed to save position reset: %v", err)
 	}
-	
+
 	// Start position ticker for restart
 	a.startPositionTicker()
 }
@@ -1783,29 +1764,29 @@ func (a *App) addToQueue(episode *models.Episode) {
 		a.playEpisode(episode)
 		return
 	}
-	
+
 	err := a.subscriptions.AddToQueue(episode.ID)
 	if err != nil {
 		a.statusMessage = "Failed to add to queue: " + err.Error()
 		a.draw()
 		return
 	}
-	
+
 	// Save subscriptions to persist queue
 	if err := a.subscriptions.Save(); err != nil {
 		log.Printf("Failed to save queue: %v", err)
 	}
-	
+
 	// Update queue view if it's current
 	if a.currentView == a.queue {
 		a.queue.refresh()
 	}
-	
+
 	// Update episode list to show queue indicators
 	if a.currentView == a.episodes {
 		a.episodes.updateTableRows()
 	}
-	
+
 	// If queue was empty, start playing
 	if len(a.subscriptions.Queue) == 1 {
 		a.statusMessage = "Added to queue and starting playback"
@@ -1814,7 +1795,7 @@ func (a *App) addToQueue(episode *models.Episode) {
 		queuePos := a.subscriptions.GetQueuePosition(episode.ID)
 		a.statusMessage = fmt.Sprintf("Added to queue (position %d)", queuePos)
 	}
-	
+
 	a.draw()
 }
 
@@ -1823,23 +1804,23 @@ func (a *App) playNextInQueue() {
 	// Remove current episode from queue
 	if a.currentEpisode != nil {
 		a.subscriptions.RemoveFromQueue(a.currentEpisode.ID)
-		
+
 		// Save subscriptions to persist queue changes
 		if err := a.subscriptions.Save(); err != nil {
 			log.Printf("Failed to save queue after removing episode: %v", err)
 		}
-		
+
 		// Update queue view if visible
 		if a.currentView == a.queue {
 			a.queue.refresh()
 		}
-		
+
 		// Update episode list to remove queue indicators
 		if a.currentView == a.episodes {
 			a.episodes.updateTableRows()
 		}
 	}
-	
+
 	// Get next episode
 	nextEpisode := a.subscriptions.GetNextInQueue()
 	if nextEpisode == nil {
@@ -1847,12 +1828,12 @@ func (a *App) playNextInQueue() {
 		a.draw()
 		return
 	}
-	
+
 	// Play next episode
 	log.Printf("Auto-advancing to next episode in queue: %s", nextEpisode.Title)
 	a.statusMessage = fmt.Sprintf("Playing next: %s", nextEpisode.Title)
 	a.draw()
-	
+
 	// Play the next episode
 	a.playEpisode(nextEpisode)
 }
@@ -1862,18 +1843,18 @@ func (a *App) removeFromQueue(episode *models.Episode) {
 	if episode == nil {
 		return
 	}
-	
+
 	// Check if we're removing the currently playing episode
 	isCurrentlyPlaying := a.currentEpisode != nil && a.currentEpisode.ID == episode.ID
-	
+
 	// Remove from queue
 	a.subscriptions.RemoveFromQueue(episode.ID)
-	
+
 	// Save subscriptions
 	if err := a.subscriptions.Save(); err != nil {
 		log.Printf("Failed to save queue after removing episode: %v", err)
 	}
-	
+
 	// Update views
 	if a.currentView == a.queue {
 		a.queue.refresh()
@@ -1881,7 +1862,7 @@ func (a *App) removeFromQueue(episode *models.Episode) {
 	if a.currentView == a.episodes {
 		a.episodes.updateTableRows()
 	}
-	
+
 	// Handle playback if we removed the currently playing episode
 	if isCurrentlyPlaying {
 		// Get next episode in queue
@@ -1898,7 +1879,7 @@ func (a *App) removeFromQueue(episode *models.Episode) {
 	} else {
 		a.statusMessage = "Removed from queue"
 	}
-	
+
 	a.draw()
 }
 
@@ -1945,7 +1926,7 @@ func (a *App) downloadEpisode(episode *models.Episode) {
 			podcastTitle = podcast.Title
 		}
 	}
-	
+
 	// Check if episode is already downloaded (comprehensive check: filesystem + registry)
 	if a.downloadManager.IsEpisodeDownloaded(episode, podcastTitle) {
 		// Episode already downloaded - ask user if they want to re-download
@@ -2066,7 +2047,7 @@ func (a *App) confirmPodcastDeletion(podcast *models.Podcast) {
 			// On Yes
 			a.statusMessage = "Deleting: " + podcast.Title
 			a.draw() // Show status immediately
-			
+
 			a.subscriptions.Remove(podcast.URL)
 			if err := a.subscriptions.Save(); err != nil {
 				a.statusMessage = "Error saving: " + err.Error()
@@ -2074,14 +2055,14 @@ func (a *App) confirmPodcastDeletion(podcast *models.Podcast) {
 			} else {
 				a.statusMessage = "Deleted: " + podcast.Title
 			}
-			
+
 			a.podcasts.SetSubscriptions(a.subscriptions)
-			
+
 			// If we deleted the last podcast, reset view
 			if len(a.subscriptions.Podcasts) == 0 {
 				a.statusMessage = "No podcasts. Press 'a' to add one."
 			}
-			
+
 			a.draw() // Update UI to reflect deletion
 		},
 		func() {
@@ -2156,20 +2137,20 @@ func (a *App) clearStatusMessage() {
 			return // Keep download status visible
 		}
 	}
-	
+
 	// Don't clear status if showing current playback information
-	if strings.Contains(a.statusMessage, "Playing") || 
-	   strings.Contains(a.statusMessage, "Resumed") || 
-	   strings.Contains(a.statusMessage, "Restarting") {
+	if strings.Contains(a.statusMessage, "Playing") ||
+		strings.Contains(a.statusMessage, "Resumed") ||
+		strings.Contains(a.statusMessage, "Restarting") {
 		return // Keep playback status visible
 	}
-	
+
 	// Don't clear recent refresh status
-	if strings.Contains(a.statusMessage, "Refreshing feeds") || 
-	   strings.Contains(a.statusMessage, "feeds refreshed") {
+	if strings.Contains(a.statusMessage, "Refreshing feeds") ||
+		strings.Contains(a.statusMessage, "feeds refreshed") {
 		return // Keep refresh status visible
 	}
-	
+
 	// Clear other status messages (completed downloads, errors, etc.)
 	a.statusMessage = ""
 }
@@ -2187,7 +2168,7 @@ func (a *App) mergePodcastData(existing *models.Podcast, updated *models.Podcast
 	// Create maps for existing episodes - by ID and by URL+date for fallback
 	existingEpisodesById := make(map[string]*models.Episode)
 	existingEpisodesByKey := make(map[string]*models.Episode)
-	
+
 	for _, episode := range existing.Episodes {
 		if episode.ID != "" {
 			existingEpisodesById[episode.ID] = episode
@@ -2202,18 +2183,18 @@ func (a *App) mergePodcastData(existing *models.Podcast, updated *models.Podcast
 	for _, newEpisode := range updated.Episodes {
 		var existingEp *models.Episode
 		var found bool
-		
+
 		// Try to find by ID first
 		if newEpisode.ID != "" {
 			existingEp, found = existingEpisodesById[newEpisode.ID]
 		}
-		
+
 		// If not found by ID, try to find by URL+date
 		if !found {
 			key := newEpisode.URL + "|" + newEpisode.PublishDate.Format("2006-01-02T15:04:05Z")
 			existingEp, found = existingEpisodesByKey[key]
 		}
-		
+
 		if found {
 			// Episode already exists - merge data, preserving user state
 			existingEp.ID = newEpisode.ID // Update ID if it was empty
@@ -2222,14 +2203,14 @@ func (a *App) mergePodcastData(existing *models.Podcast, updated *models.Podcast
 			existingEp.ConvertedDescription = newEpisode.ConvertedDescription
 			existingEp.URL = newEpisode.URL
 			existingEp.PublishDate = newEpisode.PublishDate
-			
+
 			// Update duration only if existing is unknown or new duration is more accurate
 			// Preserve discovered durations (they're more accurate than RSS feed data)
 			if existingEp.Duration == 0 && newEpisode.Duration > 0 {
 				// Only update if we don't have a duration yet
 				existingEp.Duration = newEpisode.Duration
 			}
-			
+
 			// Keep existing user state: Position, Played, Downloaded, etc.
 			mergedEpisodes = append(mergedEpisodes, existingEp)
 		} else {
@@ -2240,7 +2221,7 @@ func (a *App) mergePodcastData(existing *models.Podcast, updated *models.Podcast
 
 	// Replace episodes with merged list
 	existing.Episodes = mergedEpisodes
-	
+
 	// Update the episode index for all new/modified episodes
 	for _, episode := range mergedEpisodes {
 		a.subscriptions.UpdateEpisodeIndex(episode, existing)
@@ -2251,10 +2232,10 @@ func (a *App) mergePodcastData(existing *models.Podcast, updated *models.Podcast
 func (a *App) startPositionTicker() {
 	// Stop any existing ticker
 	a.stopPositionTicker()
-	
+
 	// Create new ticker for position updates (every 500ms)
 	a.positionTicker = time.NewTicker(500 * time.Millisecond)
-	
+
 	go func() {
 		for range a.positionTicker.C {
 			// Only update if playing
@@ -2285,7 +2266,7 @@ func (a *App) updateCurrentPosition() {
 			// Update position in the actual subscription data using the index
 			if episode := a.subscriptions.GetEpisodeByID(a.currentEpisode.ID); episode != nil {
 				episode.Position = position
-				
+
 				// Also check and update duration if it has changed
 				if duration, err := a.player.GetDuration(); err == nil && duration > 0 {
 					if episode.Duration != duration {
@@ -2301,7 +2282,7 @@ func (a *App) updateCurrentPosition() {
 					}
 				}
 			}
-			
+
 			// Also update our local reference
 			a.currentEpisode.Position = position
 		}

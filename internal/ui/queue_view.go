@@ -43,11 +43,11 @@ func NewQueueView() *QueueView {
 
 	// Configure table columns with podcast title
 	columns := []TableColumn{
-		{Title: "Local", Width: 9, Align: AlignLeft},                      // Status/Download
+		{Title: "Local", Width: 9, Align: AlignLeft},                        // Status/Download
 		{Title: "Podcast", MinWidth: 15, FlexWeight: 0.4, Align: AlignLeft}, // Podcast title
 		{Title: "Episode", MinWidth: 20, FlexWeight: 0.6, Align: AlignLeft}, // Episode title
-		{Title: "Date", Width: 10, Align: AlignLeft},                      // Date
-		{Title: "Position", Width: 17, Align: AlignLeft},                  // Position
+		{Title: "Date", Width: 10, Align: AlignLeft},                        // Date
+		{Title: "Position", Width: 17, Align: AlignLeft},                    // Position
 	}
 	v.table.SetColumns(columns)
 
@@ -85,7 +85,7 @@ func (v *QueueView) refresh() {
 	for i, episode := range v.episodes {
 		// Get the podcast for this episode
 		podcast := v.subscriptions.GetPodcastForEpisode(episode.ID)
-		
+
 		row := &QueueTableRow{
 			episode:         episode,
 			podcast:         podcast,
@@ -96,12 +96,12 @@ func (v *QueueView) refresh() {
 			isDownloaded:    episode.Downloaded,
 			downloadManager: v.downloadManager,
 		}
-		
+
 		// Apply search matches if active
 		if v.searchActive && v.searchQuery != "" {
 			row.searchMatches = v.findSearchMatches(episode.Title, v.searchQuery)
 		}
-		
+
 		rows[i] = row
 	}
 
@@ -128,7 +128,7 @@ func (v *QueueView) isCurrentlyDownloading(episode *models.Episode) bool {
 	if v.downloadManager == nil {
 		return false
 	}
-	
+
 	// Check download progress
 	if progress, exists := v.downloadManager.GetDownloadProgress(episode.ID); exists {
 		return progress.Status == download.StatusDownloading && progress.LastError == ""
@@ -138,7 +138,7 @@ func (v *QueueView) isCurrentlyDownloading(episode *models.Episode) bool {
 
 func (v *QueueView) Draw(s tcell.Screen) {
 	width, height := s.Size()
-	
+
 	// Draw header
 	headerText := "Episode Queue"
 	if len(v.episodes) > 0 {
@@ -148,12 +148,12 @@ func (v *QueueView) Draw(s tcell.Screen) {
 	for x := 0; x < width; x++ {
 		s.SetContent(x, 1, '─', nil, tcell.StyleDefault)
 	}
-	
+
 	// Table starts below header
 	v.table.SetPosition(0, 2)
 	v.table.SetSize(width, height-3) // Leave room for header and status bar
 	v.table.Draw(s)
-	
+
 	// Show search info if active
 	if v.searchActive && len(v.searchMatches) > 0 {
 		v.drawSearchInfo(s)
@@ -165,7 +165,7 @@ func (v *QueueView) drawSearchInfo(s tcell.Screen) {
 	info := fmt.Sprintf(" Match %d of %d ", v.currentMatch+1, len(v.searchMatches))
 	x := width - len(info) - 2
 	y := 3 // Below header and separator line
-	
+
 	style := tcell.StyleDefault.Background(ColorBgHighlight).Foreground(ColorBright)
 	for i, r := range info {
 		s.SetContent(x+i, y, r, nil, style)
@@ -212,14 +212,14 @@ func (v *QueueView) HandleKey(ev *tcell.EventKey) bool {
 				return true
 			}
 		}
-		
+
 		switch ev.Rune() {
 		case 'j':
 			return v.table.SelectNext()
 		case 'k':
 			return v.table.SelectPrevious()
 		case 'g':
-			// Navigate to episode in episode list - handled by app
+			v.table.SelectFirst()
 			return true
 		case 'G':
 			v.table.SelectLast()
@@ -266,19 +266,19 @@ func (v *QueueView) UpdateCurrentEpisodePosition(s tcell.Screen) {
 	if v.player == nil {
 		return
 	}
-	
+
 	// Get current position and duration
 	position, _ := v.player.GetPosition()
 	duration, _ := v.player.GetDuration()
 	for i, row := range v.table.rows {
 		if qRow, ok := row.(*QueueTableRow); ok {
 			// Check if this is the currently playing episode
-			if qRow.currentEpisode != nil && qRow.episode.ID == qRow.currentEpisode.ID && 
-			   (v.player.GetState() == player.StatePlaying || v.player.GetState() == player.StatePaused) {
+			if qRow.currentEpisode != nil && qRow.episode.ID == qRow.currentEpisode.ID &&
+				(v.player.GetState() == player.StatePlaying || v.player.GetState() == player.StatePaused) {
 				// Update the episode position
 				qRow.episode.Position = position
 				qRow.episode.Duration = duration
-				
+
 				// Redraw just this row
 				v.table.drawRow(s, v.table.y+v.table.headerHeight+i-v.table.scrollOffset, row, i == v.table.selectedIdx)
 				return
@@ -292,20 +292,20 @@ func (v *QueueView) StartSearch(query string) {
 	v.searchActive = true
 	v.searchMatches = []int{}
 	v.currentMatch = 0
-	
+
 	// Find all matches
 	for i, episode := range v.episodes {
 		if v.findSearchMatches(episode.Title, query) != nil {
 			v.searchMatches = append(v.searchMatches, i)
 		}
 	}
-	
+
 	// Jump to first match
 	if len(v.searchMatches) > 0 {
 		v.table.selectedIdx = v.searchMatches[0]
 		v.table.ensureVisible()
 	}
-	
+
 	v.refresh()
 }
 
@@ -342,10 +342,10 @@ func (v *QueueView) findSearchMatches(text, query string) []int {
 	if query == "" {
 		return nil
 	}
-	
+
 	lowerText := strings.ToLower(text)
 	lowerQuery := strings.ToLower(query)
-	
+
 	var matches []int
 	start := 0
 	for {
@@ -358,7 +358,7 @@ func (v *QueueView) findSearchMatches(text, query string) []int {
 		}
 		start += idx + 1
 	}
-	
+
 	return matches
 }
 
@@ -368,7 +368,7 @@ func (r *QueueTableRow) GetCell(columnIndex int) string {
 	switch columnIndex {
 	case 0: // Status column
 		status := fmt.Sprintf("%d", r.queuePosition)
-		
+
 		// Add download/playback indicators after position
 		if r.currentEpisode != nil && r.episode.ID == r.currentEpisode.ID && r.player != nil {
 			if r.player.GetState() == player.StatePlaying {
@@ -377,7 +377,7 @@ func (r *QueueTableRow) GetCell(columnIndex int) string {
 				status += " ⏸"
 			}
 		}
-		
+
 		if r.isDownloaded {
 			status += " ✔"
 		} else if r.isDownloading {
@@ -391,7 +391,7 @@ func (r *QueueTableRow) GetCell(columnIndex int) string {
 				}
 			}
 		}
-		
+
 		return status
 	case 1: // Podcast
 		if r.podcast != nil {
@@ -443,10 +443,9 @@ func formatQueueDuration(d time.Duration) string {
 	hours := int(d.Hours())
 	minutes := int(d.Minutes()) % 60
 	seconds := int(d.Seconds()) % 60
-	
+
 	if hours > 0 {
 		return fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds)
 	}
 	return fmt.Sprintf("%d:%02d", minutes, seconds)
 }
-

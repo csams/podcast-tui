@@ -1,0 +1,24 @@
+{
+  "id": "episode-queue",
+  "started": "2025-01-22T14:54:00Z",
+  "lastUpdated": "2025-01-22T15:03:00Z",
+  "status": "active",
+  "phase": "complete",
+  "progress": {
+    "discovery": { "answered": 5, "total": 5 },
+    "detail": { "answered": 5, "total": 5 }
+  },
+  "contextFiles": [
+    "internal/ui/app.go",
+    "internal/ui/episode_list.go",
+    "internal/models/subscription.go",
+    "internal/player/player.go",
+    "internal/models/podcast.go"
+  ],
+  "relatedFeatures": [
+    "Episode state tracking",
+    "View switching (h/l)",
+    "Download queue",
+    "Persistence system"
+  ]
+}

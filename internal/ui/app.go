@@ -23,8 +23,10 @@ type App struct {
 	quit            chan struct{}
 	mode            Mode
 	currentView     View
+	previousView    View
 	podcasts        *PodcastListView
 	episodes        *EpisodeListView
+	queue           *QueueView
 	player          *player.Player
 	downloadManager *download.Manager
 	subscriptions   *models.Subscriptions
@@ -136,9 +138,15 @@ func (a *App) Run() error {
 	a.podcasts = NewPodcastListView()
 	a.podcasts.SetSubscriptions(subs)
 	a.episodes = NewEpisodeListView()
+	a.episodes.SetSubscriptions(subs)
 	a.episodes.SetDownloadManager(a.downloadManager) // Pass download manager to episode list
 	a.episodes.SetPlayer(a.player) // Pass player to episode list
+	a.queue = NewQueueView()
+	a.queue.SetSubscriptions(subs)
+	a.queue.SetDownloadManager(a.downloadManager)
+	a.queue.SetPlayer(a.player)
 	a.currentView = a.podcasts
+	a.previousView = a.podcasts
 
 	// Set up signal handling for graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -217,9 +225,13 @@ func (a *App) handleEvents() {
 		case <-a.positionUpdate:
 			// Update position display
 			a.updateCurrentPosition()
-			// Only update the position column if we're viewing episodes
+			// Update the position column in current view
 			if a.currentView == a.episodes {
 				a.episodes.UpdateCurrentEpisodePosition(a.screen)
+				a.drawStatusBar() // Also update the status bar
+				a.screen.Show()
+			} else if a.currentView == a.queue {
+				a.queue.UpdateCurrentEpisodePosition(a.screen)
 				a.drawStatusBar() // Also update the status bar
 				a.screen.Show()
 			}
@@ -258,8 +270,43 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 	if a.mode == ModeNormal {
 		switch ev.Key() {
 		case tcell.KeyRune:
+			// Check for Alt key combinations first
+			if ev.Modifiers()&tcell.ModAlt != 0 && a.currentView == a.queue {
+				switch ev.Rune() {
+				case 'j':
+					// Move episode down in queue
+					selectedIdx := a.queue.GetSelectedIndex()
+					if a.subscriptions.MoveQueueItemDown(selectedIdx) {
+						if err := a.subscriptions.Save(); err != nil {
+							a.statusMessage = "Error saving queue: " + err.Error()
+						} else {
+							a.statusMessage = "Moved episode down"
+							a.queue.refresh()
+							// Keep selection on the moved item
+							a.queue.table.selectedIdx = selectedIdx + 1
+						}
+					}
+					return true
+				case 'k':
+					// Move episode up in queue
+					selectedIdx := a.queue.GetSelectedIndex()
+					if a.subscriptions.MoveQueueItemUp(selectedIdx) {
+						if err := a.subscriptions.Save(); err != nil {
+							a.statusMessage = "Error saving queue: " + err.Error()
+						} else {
+							a.statusMessage = "Moved episode up"
+							a.queue.refresh()
+							// Keep selection on the moved item
+							a.queue.table.selectedIdx = selectedIdx - 1
+						}
+					}
+					return true
+				}
+			}
+			
 			switch ev.Rune() {
-			case 'q':
+			case 'Q':
+				// Quit application (capital Q)
 				// Post an interrupt event to ensure event loop exits
 				if a.screen != nil {
 					a.screen.PostEvent(tcell.NewEventInterrupt(nil))
@@ -267,6 +314,15 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				close(a.quit)
 				a.shutdown()
 				return false
+			case 'q':
+				// Switch to queue view from podcast or episode view
+				if a.currentView == a.podcasts || a.currentView == a.episodes {
+					a.previousView = a.currentView
+					a.currentView = a.queue
+					a.queue.refresh()
+					a.clearStatusMessage()
+					return true
+				}
 			case 'j':
 				// Clear status message when navigating
 				a.clearStatusMessage()
@@ -294,15 +350,41 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				} else if a.currentView == a.episodes {
 					if episode := a.episodes.GetSelected(); episode != nil {
 						log.Printf("User pressed 'l' - Episode: %s, Position: %v", episode.Title, episode.Position)
-						// Run in goroutine to avoid blocking UI
+						// Add to queue
+						go a.addToQueue(episode)
+						return true
+					}
+				} else if a.currentView == a.queue {
+					if episode := a.queue.GetSelected(); episode != nil {
+						log.Printf("User pressed 'l' in queue - Episode: %s", episode.Title)
+						// Play immediately from queue
 						go a.playEpisode(episode)
 						return true
 					}
 				}
 			case 'g':
-				// Clear status message when navigating
-				a.clearStatusMessage()
-				return a.currentView.HandleKey(ev)
+				if a.currentView == a.queue {
+					// Navigate to episode in episode list
+					if episode := a.queue.GetSelected(); episode != nil {
+						// Find the podcast containing this episode
+						podcast := a.subscriptions.GetPodcastForEpisode(episode.ID)
+						if podcast != nil {
+							// Switch to episode view with this podcast
+							a.episodes.SetPodcast(podcast)
+							a.currentView = a.episodes
+							
+							// Find and select the episode in the list
+							a.selectEpisodeInList(episode.ID)
+							
+							a.statusMessage = "Navigated to episode in list"
+							return true
+						}
+					}
+				} else {
+					// Clear status message when navigating
+					a.clearStatusMessage()
+					return a.currentView.HandleKey(ev)
+				}
 			case 'G':
 				// Clear status message when navigating
 				a.clearStatusMessage()
@@ -339,8 +421,13 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				// Seek forward 30 seconds
 				if a.player.GetState() != player.StateStopped {
 					go func() {
+						position, _ := a.player.GetPosition()
+						duration, _ := a.player.GetDuration()
+						
 						if err := a.player.Seek(30); err != nil {
 							a.statusMessage = "Seek error: " + err.Error()
+						} else if duration > 0 && position+30*time.Second > duration {
+							a.statusMessage = "Seeked to near end"
 						}
 					}()
 				}
@@ -349,8 +436,12 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				// Seek backward 30 seconds
 				if a.player.GetState() != player.StateStopped {
 					go func() {
+						position, _ := a.player.GetPosition()
+						
 						if err := a.player.Seek(-30); err != nil {
 							a.statusMessage = "Seek error: " + err.Error()
+						} else if position < 30*time.Second {
+							a.statusMessage = "Seeked to beginning"
 						}
 					}()
 				}
@@ -425,6 +516,36 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 					}()
 				}
 				return true
+			case 'p':
+				// Switch to podcast view from episode or queue view
+				if a.currentView == a.episodes || a.currentView == a.queue {
+					a.currentView = a.podcasts
+					a.clearStatusMessage()
+					return true
+				}
+			case 'e':
+				// Switch to episode view
+				if a.currentView == a.podcasts {
+					// From podcast view, open episodes for selected podcast
+					if selected := a.podcasts.GetSelected(); selected != nil {
+						a.clearStatusMessage()
+						a.episodes.SetPodcast(selected)
+						a.currentView = a.episodes
+						return true
+					}
+				} else if a.currentView == a.queue {
+					// From queue view, same as 'g' - go to episode in episode list
+					if episode := a.queue.GetSelected(); episode != nil {
+						podcast := a.subscriptions.GetPodcastForEpisode(episode.ID)
+						if podcast != nil {
+							a.episodes.SetPodcast(podcast)
+							a.currentView = a.episodes
+							a.selectEpisodeInList(episode.ID)
+							a.statusMessage = "Navigated to episode in list"
+							return true
+						}
+					}
+				}
 			case 'a':
 				// Add podcast
 				a.mode = ModeCommand
@@ -435,6 +556,25 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				if a.currentView == a.episodes {
 					if episode := a.episodes.GetSelected(); episode != nil {
 						go a.downloadEpisode(episode)
+						return true
+					}
+				}
+			case 'u':
+				// Remove from queue
+				if a.currentView == a.episodes {
+					if episode := a.episodes.GetSelected(); episode != nil {
+						// Check if episode is in queue
+						if a.subscriptions.GetQueuePosition(episode.ID) > 0 {
+							a.removeFromQueue(episode)
+							return true
+						} else {
+							a.statusMessage = "Episode not in queue"
+							return true
+						}
+					}
+				} else if a.currentView == a.queue {
+					if episode := a.queue.GetSelected(); episode != nil {
+						a.removeFromQueue(episode)
 						return true
 					}
 				}
@@ -470,10 +610,15 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 						go a.restartEpisode(episode)
 						return true
 					}
+				} else if a.currentView == a.queue {
+					if episode := a.queue.GetSelected(); episode != nil {
+						go a.restartEpisode(episode)
+						return true
+					}
 				}
 			case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
 				// Number keys for percentage-based seeking (0=0%, 1=10%, ..., 9=90%)
-				if a.currentView == a.episodes && a.player.GetState() != player.StateStopped {
+				if (a.currentView == a.episodes || a.currentView == a.queue) && a.player.GetState() != player.StateStopped {
 					duration, err := a.player.GetDuration()
 					if err == nil && duration > 0 {
 						percentage := float64(ev.Rune()-'0') / 10.0
@@ -528,7 +673,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				return true
 			}
 		case tcell.KeyEnter:
-			// Handle Enter key same as 'l' for playing episodes
+			// Handle Enter key for different views
 			if a.currentView == a.podcasts {
 				if selected := a.podcasts.GetSelected(); selected != nil {
 					a.clearStatusMessage()
@@ -539,7 +684,14 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 			} else if a.currentView == a.episodes {
 				if episode := a.episodes.GetSelected(); episode != nil {
 					log.Printf("User pressed Enter - Episode: %s, Position: %v", episode.Title, episode.Position)
-					// Run in goroutine to avoid blocking UI
+					// Add to queue
+					go a.addToQueue(episode)
+					return true
+				}
+			} else if a.currentView == a.queue {
+				if episode := a.queue.GetSelected(); episode != nil {
+					log.Printf("User pressed Enter in queue - Episode: %s", episode.Title)
+					// Play immediately from queue
 					go a.playEpisode(episode)
 					return true
 				}
@@ -547,12 +699,29 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 		case tcell.KeyEscape:
 			a.mode = ModeNormal
 			return true
+		case tcell.KeyTab:
+			// TAB switches to queue view from podcast/episode view, or returns to previous view from queue
+			if a.currentView == a.podcasts || a.currentView == a.episodes {
+				// Save current view and switch to queue
+				a.previousView = a.currentView
+				a.currentView = a.queue
+				a.queue.refresh()
+			} else if a.currentView == a.queue {
+				// Return to previous view
+				a.currentView = a.previousView
+			}
+			return true
 		case tcell.KeyRight:
 			// Seek forward 10 seconds (only when player has content)
 			if a.player.GetState() != player.StateStopped {
 				go func() {
+					position, _ := a.player.GetPosition()
+					duration, _ := a.player.GetDuration()
+					
 					if err := a.player.Seek(10); err != nil {
 						a.statusMessage = "Seek error: " + err.Error()
+					} else if duration > 0 && position+10*time.Second > duration {
+						a.statusMessage = "Seeked to near end"
 					}
 				}()
 				return true
@@ -561,8 +730,12 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 			// Seek backward 10 seconds (only when player has content)
 			if a.player.GetState() != player.StateStopped {
 				go func() {
+					position, _ := a.player.GetPosition()
+					
 					if err := a.player.Seek(-10); err != nil {
 						a.statusMessage = "Seek error: " + err.Error()
+					} else if position < 10*time.Second {
+						a.statusMessage = "Seeked to beginning"
 					}
 				}()
 				return true
@@ -773,11 +946,54 @@ func (a *App) draw() {
 
 func (a *App) handleProgress() {
 	saveCounter := 0
-	for range a.player.Progress() {
+	var lastEpisodeID string
+	completionTriggered := false
+	
+	for progress := range a.player.Progress() {
 		// Don't redraw the entire screen - just update the status bar
 		// The position ticker handles updating the episode list view
 		a.drawStatusBar()
 		a.screen.Show()
+
+		// Reset completion trigger when episode changes
+		if a.currentEpisode != nil && a.currentEpisode.ID != lastEpisodeID {
+			lastEpisodeID = a.currentEpisode.ID
+			completionTriggered = false
+		}
+
+		// Check for episode completion (position >= duration, meaning episode has ended)
+		if !completionTriggered && progress.Duration > 0 {
+			// Log progress for debugging
+			percentComplete := float64(progress.Position) / float64(progress.Duration) * 100
+			timeRemaining := progress.Duration - progress.Position
+			
+			// Log every 10 seconds when near the end
+			if timeRemaining < 30*time.Second && saveCounter%10 == 0 {
+				log.Printf("Episode progress: %.1f%% complete, %v remaining (pos: %v, dur: %v)", 
+					percentComplete, timeRemaining, progress.Position, progress.Duration)
+			}
+			
+			if progress.Position >= progress.Duration {
+				// Episode has ended
+				log.Printf("Episode completion detected! Position: %v, Duration: %v", 
+					progress.Position, progress.Duration)
+				
+				// Check if there's a next episode in queue
+				if nextEpisode := a.subscriptions.GetNextInQueue(); nextEpisode != nil {
+					log.Printf("Next episode in queue: %s", nextEpisode.Title)
+					completionTriggered = true
+					go func() {
+						// Give a brief pause before advancing
+						time.Sleep(500 * time.Millisecond)
+						a.playNextInQueue()
+					}()
+				} else {
+					// No more episodes in queue
+					log.Printf("Episode ended, no more episodes in queue")
+					completionTriggered = true
+				}
+			}
+		}
 
 		// Save position every 30 seconds
 		saveCounter++
@@ -986,12 +1202,22 @@ func (a *App) executeCommand() {
 			return
 		}
 		go a.addPodcast(parts[1])
-	case "q", "quit":
+	case "Q", "quit":
 		// Post an interrupt event to ensure event loop exits
 		if a.screen != nil {
 			a.screen.PostEvent(tcell.NewEventInterrupt(nil))
 		}
 		close(a.quit)
+	case "q":
+		// Switch to queue view
+		if a.currentView == a.podcasts || a.currentView == a.episodes {
+			a.previousView = a.currentView
+			a.currentView = a.queue
+			a.queue.refresh()
+			a.mode = ModeNormal
+			a.commandLine = ""
+			return
+		}
 	}
 }
 
@@ -1142,6 +1368,7 @@ func (a *App) saveEpisodePosition() {
 						
 						// Update the episode list view's reference
 						a.episodes.SetCurrentEpisode(a.currentEpisode)
+						a.queue.SetCurrentEpisode(a.currentEpisode)
 						
 						// Immediately update the UI to show the new duration
 						if a.currentView == a.episodes {
@@ -1203,6 +1430,7 @@ func (a *App) stopCurrentEpisode() {
 	a.currentEpisode = nil
 	a.currentPodcast = nil
 	a.episodes.SetCurrentEpisode(nil)
+	a.queue.SetCurrentEpisode(nil)
 	
 	// Redraw to clear episode highlighting
 	a.draw()
@@ -1225,13 +1453,18 @@ func (a *App) playEpisode(episode *models.Episode) {
 		a.currentEpisode = canonicalEpisode
 		// Update the UI's reference to use the canonical episode
 		a.episodes.SetCurrentEpisode(canonicalEpisode)
+		a.queue.SetCurrentEpisode(canonicalEpisode)
 	} else {
 		a.currentEpisode = episode
 		a.episodes.SetCurrentEpisode(episode)
+		a.queue.SetCurrentEpisode(episode)
 	}
 	// Set current podcast for status bar display
 	if a.currentView == a.episodes {
 		a.currentPodcast = a.episodes.GetCurrentPodcast()
+	} else {
+		// Find the podcast that contains this episode
+		a.currentPodcast = a.subscriptions.GetPodcastForEpisode(episode.ID)
 	}
 
 	// Get podcast title for download checking
@@ -1467,14 +1700,19 @@ func (a *App) restartEpisode(episode *models.Episode) {
 		canonicalEpisode.Position = 0
 		// Update the UI's reference to use the canonical episode
 		a.episodes.SetCurrentEpisode(canonicalEpisode)
+		a.queue.SetCurrentEpisode(canonicalEpisode)
 	} else {
 		a.currentEpisode = episode
 		episode.Position = 0
 		a.episodes.SetCurrentEpisode(episode)
+		a.queue.SetCurrentEpisode(episode)
 	}
 	// Set current podcast for status bar display
 	if a.currentView == a.episodes {
 		a.currentPodcast = a.episodes.GetCurrentPodcast()
+	} else {
+		// Find the podcast that contains this episode
+		a.currentPodcast = a.subscriptions.GetPodcastForEpisode(episode.ID)
 	}
 
 	// Get podcast title for download checking
@@ -1534,6 +1772,134 @@ func (a *App) restartEpisode(episode *models.Episode) {
 	
 	// Start position ticker for restart
 	a.startPositionTicker()
+}
+
+// addToQueue adds an episode to the playback queue
+func (a *App) addToQueue(episode *models.Episode) {
+	// Check if episode is already in queue
+	if a.subscriptions.GetQueuePosition(episode.ID) > 0 {
+		// Episode is already in queue, play it immediately
+		a.statusMessage = "Playing from queue"
+		a.playEpisode(episode)
+		return
+	}
+	
+	err := a.subscriptions.AddToQueue(episode.ID)
+	if err != nil {
+		a.statusMessage = "Failed to add to queue: " + err.Error()
+		a.draw()
+		return
+	}
+	
+	// Save subscriptions to persist queue
+	if err := a.subscriptions.Save(); err != nil {
+		log.Printf("Failed to save queue: %v", err)
+	}
+	
+	// Update queue view if it's current
+	if a.currentView == a.queue {
+		a.queue.refresh()
+	}
+	
+	// Update episode list to show queue indicators
+	if a.currentView == a.episodes {
+		a.episodes.updateTableRows()
+	}
+	
+	// If queue was empty, start playing
+	if len(a.subscriptions.Queue) == 1 {
+		a.statusMessage = "Added to queue and starting playback"
+		a.playEpisode(episode)
+	} else {
+		queuePos := a.subscriptions.GetQueuePosition(episode.ID)
+		a.statusMessage = fmt.Sprintf("Added to queue (position %d)", queuePos)
+	}
+	
+	a.draw()
+}
+
+// playNextInQueue plays the next episode in the queue
+func (a *App) playNextInQueue() {
+	// Remove current episode from queue
+	if a.currentEpisode != nil {
+		a.subscriptions.RemoveFromQueue(a.currentEpisode.ID)
+		
+		// Save subscriptions to persist queue changes
+		if err := a.subscriptions.Save(); err != nil {
+			log.Printf("Failed to save queue after removing episode: %v", err)
+		}
+		
+		// Update queue view if visible
+		if a.currentView == a.queue {
+			a.queue.refresh()
+		}
+		
+		// Update episode list to remove queue indicators
+		if a.currentView == a.episodes {
+			a.episodes.updateTableRows()
+		}
+	}
+	
+	// Get next episode
+	nextEpisode := a.subscriptions.GetNextInQueue()
+	if nextEpisode == nil {
+		a.statusMessage = "Queue finished"
+		a.draw()
+		return
+	}
+	
+	// Play next episode
+	log.Printf("Auto-advancing to next episode in queue: %s", nextEpisode.Title)
+	a.statusMessage = fmt.Sprintf("Playing next: %s", nextEpisode.Title)
+	a.draw()
+	
+	// Play the next episode
+	a.playEpisode(nextEpisode)
+}
+
+// removeFromQueue removes an episode from the queue and handles playback logic
+func (a *App) removeFromQueue(episode *models.Episode) {
+	if episode == nil {
+		return
+	}
+	
+	// Check if we're removing the currently playing episode
+	isCurrentlyPlaying := a.currentEpisode != nil && a.currentEpisode.ID == episode.ID
+	
+	// Remove from queue
+	a.subscriptions.RemoveFromQueue(episode.ID)
+	
+	// Save subscriptions
+	if err := a.subscriptions.Save(); err != nil {
+		log.Printf("Failed to save queue after removing episode: %v", err)
+	}
+	
+	// Update views
+	if a.currentView == a.queue {
+		a.queue.refresh()
+	}
+	if a.currentView == a.episodes {
+		a.episodes.updateTableRows()
+	}
+	
+	// Handle playback if we removed the currently playing episode
+	if isCurrentlyPlaying {
+		// Get next episode in queue
+		nextEpisode := a.subscriptions.GetNextInQueue()
+		if nextEpisode != nil {
+			// Play next episode
+			a.statusMessage = fmt.Sprintf("Playing next: %s", nextEpisode.Title)
+			go a.playEpisode(nextEpisode)
+		} else {
+			// No more episodes in queue, stop playback
+			a.statusMessage = "Queue empty, stopping playback"
+			go a.stopCurrentEpisode()
+		}
+	} else {
+		a.statusMessage = "Removed from queue"
+	}
+	
+	a.draw()
 }
 
 // handleDownloadProgress handles download progress updates
@@ -1725,6 +2091,13 @@ func (a *App) confirmPodcastDeletion(podcast *models.Podcast) {
 		})
 }
 
+// selectEpisodeInList selects a specific episode in the episode list view
+func (a *App) selectEpisodeInList(episodeID string) {
+	if !a.episodes.SelectEpisodeByID(episodeID) {
+		log.Printf("Episode %s not found in current episode list", episodeID)
+	}
+}
+
 // confirmEpisodeDeletion shows a confirmation dialog for episode deletion
 func (a *App) confirmEpisodeDeletion(episode *models.Episode) {
 	if a.downloadManager.IsDownloading(episode.ID) {
@@ -1870,7 +2243,7 @@ func (a *App) mergePodcastData(existing *models.Podcast, updated *models.Podcast
 	
 	// Update the episode index for all new/modified episodes
 	for _, episode := range mergedEpisodes {
-		a.subscriptions.UpdateEpisodeIndex(episode)
+		a.subscriptions.UpdateEpisodeIndex(episode, existing)
 	}
 }
 
@@ -1924,6 +2297,7 @@ func (a *App) updateCurrentPosition() {
 						a.currentEpisode.Duration = duration
 						// Update the episode list view's reference
 						a.episodes.SetCurrentEpisode(a.currentEpisode)
+						a.queue.SetCurrentEpisode(a.currentEpisode)
 					}
 				}
 			}

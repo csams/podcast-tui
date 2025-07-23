@@ -2,6 +2,14 @@
 
 ## Completed Requirements
 
+### 2025-01-23-1045-episode-queue
+- **Status**: ✅ Complete
+- **Started**: 2025-01-23T10:45:00Z
+- **Completed**: 2025-01-23T18:45:00Z
+- **Summary**: Episode queue feature with auto-advance playback, persistent queue, reordering, and dedicated queue view
+- **Spec**: [View Specification](./2025-01-23-1045-episode-queue/06-requirements-spec.md)
+- **Implementation**: Fully implemented with enhanced navigation (p/e/q keys), queue reordering (Alt+j/k), and seamless playback
+
 ### 2025-01-19-1215-podcast-episode-scroll
 - **Status**: ✅ Implemented
 - **Started**: 2025-01-19T12:15:00Z

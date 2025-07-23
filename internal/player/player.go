@@ -215,6 +215,7 @@ func (p *Player) Play(url string) error {
 		fmt.Sprintf("--input-ipc-server=%s", p.socketPath),
 		"--idle",
 		"--force-window=no",
+		"--keep-open=no",  // Ensure mpv goes idle when file ends
 	)
 
 	if err := p.cmd.Start(); err != nil {
@@ -500,6 +501,40 @@ func (p *Player) Seek(seconds int) error {
 	if seconds > 300 {
 		seekType = "absolute"
 	}
+	
+	// For relative seeks, check bounds
+	if seekType == "relative" {
+		// Get current position
+		newPosition := p.position + time.Duration(seconds)*time.Second
+		
+		// Check if seek would go before start
+		if newPosition < 0 {
+			// Seek to beginning instead
+			cmd := mpvCommand{
+				Command: []interface{}{"seek", 0, "absolute"},
+			}
+			if _, err := p.sendCommand(cmd); err != nil {
+				return fmt.Errorf("failed to seek to beginning: %w", err)
+			}
+			return nil
+		}
+		
+		// Check if seek would go past end
+		if p.duration > 0 && newPosition > p.duration {
+			// Seek to near end instead (1 second before end)
+			targetSeconds := int(p.duration.Seconds()) - 1
+			if targetSeconds < 0 {
+				targetSeconds = 0
+			}
+			cmd := mpvCommand{
+				Command: []interface{}{"seek", targetSeconds, "absolute"},
+			}
+			if _, err := p.sendCommand(cmd); err != nil {
+				return fmt.Errorf("failed to seek to end: %w", err)
+			}
+			return nil
+		}
+	}
 
 	cmd := mpvCommand{
 		Command: []interface{}{"seek", seconds, seekType},
@@ -519,6 +554,20 @@ func (p *Player) SeekAbsolute(seconds int) error {
 
 	if p.state == StateStopped {
 		return nil
+	}
+
+	// Bounds checking
+	if seconds < 0 {
+		seconds = 0
+	} else if p.duration > 0 {
+		maxSeconds := int(p.duration.Seconds())
+		if seconds >= maxSeconds {
+			// Don't seek past the end - stop 1 second before
+			seconds = maxSeconds - 1
+			if seconds < 0 {
+				seconds = 0
+			}
+		}
 	}
 
 	cmd := mpvCommand{
@@ -759,7 +808,73 @@ func (p *Player) watchProgress() {
 				currentState := p.state
 				p.mu.Unlock()
 				
-				if currentState == StatePlaying {
+				if currentState == StatePlaying || currentState == StatePaused {
+					// First check if mpv is idle (no file playing)
+					idleCmd := mpvCommand{
+						Command: []interface{}{"get_property", "idle-active"},
+					}
+					if resp, err := p.sendCommand(idleCmd); err == nil {
+						if idle, ok := resp.Data.(bool); ok && idle {
+							// mpv has become idle, meaning playback has ended
+							p.mu.Lock()
+							if p.duration > 0 {
+								p.position = p.duration
+							}
+							finalProgress := Progress{
+								Position: p.position,
+								Duration: p.duration,
+							}
+							p.state = StateStopped
+							p.mu.Unlock()
+							
+							// Send final progress update
+							select {
+							case p.progressCh <- finalProgress:
+							default:
+							}
+							
+							log.Printf("Player: Episode ended (mpv is idle)")
+							return
+						}
+					}
+					
+					// Check if playback has ended (eof-reached)
+					eofCmd := mpvCommand{
+						Command: []interface{}{"get_property", "eof-reached"},
+					}
+					if resp, err := p.sendCommand(eofCmd); err == nil {
+						if eofReached, ok := resp.Data.(bool); ok && eofReached {
+							// Also check time-remaining to confirm we're at the end
+							remainCmd := mpvCommand{
+								Command: []interface{}{"get_property", "time-remaining"},
+							}
+							if remainResp, err := p.sendCommand(remainCmd); err == nil {
+								if remaining, ok := remainResp.Data.(float64); ok && remaining <= 0 {
+									// Episode has ended, send final progress update with position = duration
+									p.mu.Lock()
+									if p.duration > 0 {
+										p.position = p.duration
+									}
+									finalProgress := Progress{
+										Position: p.position,
+										Duration: p.duration,
+									}
+									p.state = StateStopped
+									p.mu.Unlock()
+									
+									// Send final progress update
+									select {
+									case p.progressCh <- finalProgress:
+									default:
+									}
+									
+									log.Printf("Player: Episode ended (EOF reached, time-remaining: %.2f)", remaining)
+									return
+								}
+							}
+						}
+					}
+					
 					// Get position
 					cmd := mpvCommand{
 						Command: []interface{}{"get_property", "time-pos"},

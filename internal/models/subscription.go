@@ -2,18 +2,25 @@ package models
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 	
 	"github.com/csams/podcast-tui/internal/markdown"
 )
 
 type Subscriptions struct {
-	Podcasts []*Podcast `json:"podcasts"`
+	Podcasts []*Podcast     `json:"podcasts"`
+	Queue    []*QueueEntry  `json:"queue,omitempty"`
 	
 	// episodeIndex is a map from episode ID to episode pointer for fast lookups
 	// This is not serialized to JSON and is rebuilt on load
 	episodeIndex map[string]*Episode `json:"-"`
+	
+	// podcastIndex is a map from episode ID to podcast pointer for fast lookups
+	// This is not serialized to JSON and is rebuilt on load
+	podcastIndex map[string]*Podcast `json:"-"`
 }
 
 func LoadSubscriptions() (*Subscriptions, error) {
@@ -29,7 +36,9 @@ func LoadSubscriptions() (*Subscriptions, error) {
 		if os.IsNotExist(err) {
 			subs := &Subscriptions{
 				Podcasts: []*Podcast{},
+				Queue:    []*QueueEntry{},
 				episodeIndex: make(map[string]*Episode),
+				podcastIndex: make(map[string]*Podcast),
 			}
 			return subs, nil
 		}
@@ -112,13 +121,17 @@ func (s *Subscriptions) Add(podcast *Podcast) {
 	}
 	s.Podcasts = append(s.Podcasts, podcast)
 	
-	// Add episodes to index
+	// Add episodes to indexes
 	if s.episodeIndex == nil {
 		s.episodeIndex = make(map[string]*Episode)
+	}
+	if s.podcastIndex == nil {
+		s.podcastIndex = make(map[string]*Podcast)
 	}
 	for _, episode := range podcast.Episodes {
 		if episode.ID != "" {
 			s.episodeIndex[episode.ID] = episode
+			s.podcastIndex[episode.ID] = podcast
 		}
 	}
 }
@@ -126,9 +139,10 @@ func (s *Subscriptions) Add(podcast *Podcast) {
 func (s *Subscriptions) Remove(url string) {
 	for i, p := range s.Podcasts {
 		if p.URL == url {
-			// Remove episodes from index before removing podcast
+			// Remove episodes from indexes before removing podcast
 			for _, episode := range p.Episodes {
 				delete(s.episodeIndex, episode.ID)
+				delete(s.podcastIndex, episode.ID)
 			}
 			s.Podcasts = append(s.Podcasts[:i], s.Podcasts[i+1:]...)
 			return
@@ -136,13 +150,15 @@ func (s *Subscriptions) Remove(url string) {
 	}
 }
 
-// buildIndex rebuilds the episode index from scratch
+// buildIndex rebuilds the episode and podcast indexes from scratch
 func (s *Subscriptions) buildIndex() {
 	s.episodeIndex = make(map[string]*Episode)
+	s.podcastIndex = make(map[string]*Podcast)
 	for _, podcast := range s.Podcasts {
 		for _, episode := range podcast.Episodes {
 			if episode.ID != "" {
 				s.episodeIndex[episode.ID] = episode
+				s.podcastIndex[episode.ID] = podcast
 			}
 		}
 	}
@@ -157,11 +173,138 @@ func (s *Subscriptions) GetEpisodeByID(episodeID string) *Episode {
 }
 
 // UpdateEpisodeIndex updates the index when episodes are added or modified
-func (s *Subscriptions) UpdateEpisodeIndex(episode *Episode) {
+func (s *Subscriptions) UpdateEpisodeIndex(episode *Episode, podcast *Podcast) {
 	if s.episodeIndex == nil {
 		s.episodeIndex = make(map[string]*Episode)
 	}
+	if s.podcastIndex == nil {
+		s.podcastIndex = make(map[string]*Podcast)
+	}
 	if episode.ID != "" {
 		s.episodeIndex[episode.ID] = episode
+		if podcast != nil {
+			s.podcastIndex[episode.ID] = podcast
+		}
 	}
+}
+
+// AddToQueue adds an episode to the playback queue
+func (s *Subscriptions) AddToQueue(episodeID string) error {
+	// Check if episode exists
+	if s.GetEpisodeByID(episodeID) == nil {
+		return fmt.Errorf("episode not found: %s", episodeID)
+	}
+	
+	// Check for duplicates
+	for _, entry := range s.Queue {
+		if entry.EpisodeID == episodeID {
+			return fmt.Errorf("episode already in queue")
+		}
+	}
+	
+	// Add to queue
+	position := len(s.Queue) + 1
+	entry := &QueueEntry{
+		EpisodeID: episodeID,
+		AddedAt:   time.Now(),
+		Position:  position,
+	}
+	s.Queue = append(s.Queue, entry)
+	return nil
+}
+
+// RemoveFromQueue removes an episode from the queue
+func (s *Subscriptions) RemoveFromQueue(episodeID string) {
+	newQueue := make([]*QueueEntry, 0, len(s.Queue))
+	for _, entry := range s.Queue {
+		if entry.EpisodeID != episodeID {
+			newQueue = append(newQueue, entry)
+		}
+	}
+	s.Queue = newQueue
+	s.reindexQueue()
+}
+
+// GetQueuePosition returns the position of an episode in the queue (0 if not in queue)
+func (s *Subscriptions) GetQueuePosition(episodeID string) int {
+	for i, entry := range s.Queue {
+		if entry.EpisodeID == episodeID {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// GetNextInQueue returns the next episode in the queue
+func (s *Subscriptions) GetNextInQueue() *Episode {
+	if len(s.Queue) > 0 {
+		return s.GetEpisodeByID(s.Queue[0].EpisodeID)
+	}
+	return nil
+}
+
+// ReorderQueue reorders the queue based on new positions
+func (s *Subscriptions) ReorderQueue(positions []int) {
+	if len(positions) != len(s.Queue) {
+		return
+	}
+	
+	newQueue := make([]*QueueEntry, len(s.Queue))
+	for i, pos := range positions {
+		if pos-1 < len(s.Queue) && pos-1 >= 0 {
+			newQueue[i] = s.Queue[pos-1]
+		}
+	}
+	s.Queue = newQueue
+	s.reindexQueue()
+}
+
+// MoveQueueItemUp moves an item up in the queue (towards position 1)
+func (s *Subscriptions) MoveQueueItemUp(index int) bool {
+	if index <= 0 || index >= len(s.Queue) {
+		return false
+	}
+	
+	// Swap with previous item
+	s.Queue[index], s.Queue[index-1] = s.Queue[index-1], s.Queue[index]
+	s.reindexQueue()
+	return true
+}
+
+// MoveQueueItemDown moves an item down in the queue (towards the end)
+func (s *Subscriptions) MoveQueueItemDown(index int) bool {
+	if index < 0 || index >= len(s.Queue)-1 {
+		return false
+	}
+	
+	// Swap with next item
+	s.Queue[index], s.Queue[index+1] = s.Queue[index+1], s.Queue[index]
+	s.reindexQueue()
+	return true
+}
+
+// reindexQueue updates position numbers after queue changes
+func (s *Subscriptions) reindexQueue() {
+	for i, entry := range s.Queue {
+		entry.Position = i + 1
+	}
+}
+
+// GetQueueEpisodes returns all episodes in the queue in order
+func (s *Subscriptions) GetQueueEpisodes() []*Episode {
+	episodes := make([]*Episode, 0, len(s.Queue))
+	for _, entry := range s.Queue {
+		if episode := s.GetEpisodeByID(entry.EpisodeID); episode != nil {
+			episodes = append(episodes, episode)
+		}
+	}
+	return episodes
+}
+
+// GetPodcastForEpisode returns the podcast that contains the given episode
+func (s *Subscriptions) GetPodcastForEpisode(episodeID string) *Podcast {
+	if s.podcastIndex == nil {
+		s.buildIndex()
+	}
+	return s.podcastIndex[episodeID]
 }

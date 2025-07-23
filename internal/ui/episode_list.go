@@ -21,6 +21,7 @@ type EpisodeTableRow struct {
 	currentEpisode  *models.Episode
 	player          *player.Player
 	podcastTitle    string
+	subscriptions   *models.Subscriptions
 }
 
 func (r *EpisodeTableRow) GetCell(columnIndex int) string {
@@ -69,49 +70,57 @@ func (r *EpisodeTableRow) GetHighlightPositions(columnIndex int) []int {
 }
 
 func (r *EpisodeTableRow) getDownloadIndicator() string {
-	// Playing/paused indicators take precedence
-	if r.currentEpisode != nil && r.episode.ID == r.currentEpisode.ID && r.player != nil {
-		if r.player.GetState() == player.StatePlaying {
-			return "▶"
-		} else if r.player.GetState() == player.StatePaused {
-			return "⏸"
+	var indicators []string
+	
+	// Queue position first
+	if r.subscriptions != nil {
+		if queuePos := r.subscriptions.GetQueuePosition(r.episode.ID); queuePos > 0 {
+			indicators = append(indicators, fmt.Sprintf("Q:%d", queuePos))
 		}
 	}
 	
-	if r.downloadManager == nil {
-		return ""
+	// Playing/paused indicators
+	if r.currentEpisode != nil && r.episode.ID == r.currentEpisode.ID && r.player != nil {
+		if r.player.GetState() == player.StatePlaying {
+			indicators = append(indicators, "▶")
+		} else if r.player.GetState() == player.StatePaused {
+			indicators = append(indicators, "⏸")
+		}
 	}
-
-	// Check if downloaded
-	if r.downloadManager.IsEpisodeDownloaded(r.episode, r.podcastTitle) {
-		return "✔"
-	}
-
-	// Check download status
-	if r.downloadManager.IsDownloading(r.episode.ID) {
-		if progress, exists := r.downloadManager.GetDownloadProgress(r.episode.ID); exists {
-			switch progress.Status {
-			case download.StatusDownloading:
-				return fmt.Sprintf("[⬇%.0f%%]", progress.Progress*100)
-			case download.StatusQueued:
-				return "[⏸]"
-			case download.StatusFailed:
-				return "[⚠]"
-			default:
-				return "[⬇]"
+	
+	// Download status
+	if r.downloadManager != nil {
+		// Check if downloaded
+		if r.downloadManager.IsEpisodeDownloaded(r.episode, r.podcastTitle) {
+			indicators = append(indicators, "✔")
+		} else if r.downloadManager.IsDownloading(r.episode.ID) {
+			// Check download progress
+			if progress, exists := r.downloadManager.GetDownloadProgress(r.episode.ID); exists {
+				switch progress.Status {
+				case download.StatusDownloading:
+					indicators = append(indicators, fmt.Sprintf("[⬇%.0f%%]", progress.Progress*100))
+				case download.StatusQueued:
+					indicators = append(indicators, "[⏸]")
+				case download.StatusFailed:
+					indicators = append(indicators, "[⚠]")
+				default:
+					indicators = append(indicators, "[⬇]")
+				}
+			} else {
+				indicators = append(indicators, "[⬇]")
+			}
+		} else {
+			// Check for failed downloads
+			if progress, exists := r.downloadManager.GetDownloadProgress(r.episode.ID); exists {
+				if progress.Status == download.StatusFailed {
+					indicators = append(indicators, "[⚠]")
+				}
 			}
 		}
-		return "[⬇]"
 	}
 
-	// Check for failed downloads
-	if progress, exists := r.downloadManager.GetDownloadProgress(r.episode.ID); exists {
-		if progress.Status == download.StatusFailed {
-			return "[⚠]"
-		}
-	}
-
-	return ""
+	// Join all indicators with space
+	return strings.Join(indicators, " ")
 }
 
 func (r *EpisodeTableRow) formatPublishDate() string {
@@ -159,6 +168,7 @@ type EpisodeListView struct {
 	player           *player.Player
 	searchState      *SearchState
 	descScrollOffset int
+	subscriptions    *models.Subscriptions
 }
 
 func NewEpisodeListView() *EpisodeListView {
@@ -204,6 +214,10 @@ func (v *EpisodeListView) SetCurrentEpisode(episode *models.Episode) {
 
 func (v *EpisodeListView) SetPlayer(p *player.Player) {
 	v.player = p
+}
+
+func (v *EpisodeListView) SetSubscriptions(s *models.Subscriptions) {
+	v.subscriptions = s
 }
 
 func (v *EpisodeListView) UpdateEpisodeDuration(episodeID string, newDuration time.Duration) {
@@ -454,6 +468,7 @@ func (v *EpisodeListView) updateTableRows() {
 			currentEpisode:  v.currentEpisode,
 			player:          v.player,
 			podcastTitle:    podcastTitle,
+			subscriptions:   v.subscriptions,
 		}
 	}
 	
@@ -466,6 +481,20 @@ func (v *EpisodeListView) GetSearchState() *SearchState {
 
 func (v *EpisodeListView) UpdateSearch() {
 	v.applyFilter()
+}
+
+// SelectEpisodeByID finds and selects an episode by its ID
+func (v *EpisodeListView) SelectEpisodeByID(episodeID string) bool {
+	episodes := v.getActiveEpisodes()
+	for i, episode := range episodes {
+		if episode.ID == episodeID {
+			v.table.selectedIdx = i
+			v.table.ensureVisible()
+			v.descScrollOffset = 0 // Reset description scroll
+			return true
+		}
+	}
+	return false
 }
 
 // Helper function for duration formatting

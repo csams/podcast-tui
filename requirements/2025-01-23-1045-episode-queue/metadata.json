@@ -1,0 +1,25 @@
+{
+  "id": "episode-queue",
+  "started": "2025-01-23T10:45:00Z",
+  "lastUpdated": "2025-01-23T18:45:00Z",
+  "completedAt": "2025-01-23T18:45:00Z",
+  "status": "complete",
+  "phase": "complete",
+  "progress": {
+    "discovery": { "answered": 5, "total": 5 },
+    "detail": { "answered": 5, "total": 5 }
+  },
+  "contextFiles": [
+    "internal/ui/table.go",
+    "internal/ui/app.go",
+    "internal/ui/episode_list.go",
+    "internal/player/player.go",
+    "internal/models/subscription.go"
+  ],
+  "relatedFeatures": [
+    "episode list view",
+    "table abstraction",
+    "player track switching",
+    "subscription persistence"
+  ]
+}

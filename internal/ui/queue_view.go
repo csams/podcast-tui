@@ -30,8 +30,6 @@ type QueueTableRow struct {
 	queuePosition   int
 	currentEpisode  *models.Episode
 	player          *player.Player
-	isDownloading   bool
-	isDownloaded    bool
 	searchMatches   []int
 	downloadManager *download.Manager
 }
@@ -92,8 +90,6 @@ func (v *QueueView) refresh() {
 			queuePosition:   i + 1,
 			currentEpisode:  v.currentEpisode,
 			player:          v.player,
-			isDownloading:   v.isCurrentlyDownloading(episode),
-			isDownloaded:    episode.Downloaded,
 			downloadManager: v.downloadManager,
 		}
 
@@ -124,17 +120,6 @@ func (v *QueueView) isCurrentlyPaused(episode *models.Episode) bool {
 	return v.currentEpisode != nil && v.currentEpisode.ID == episode.ID && v.player.GetState() == player.StatePaused
 }
 
-func (v *QueueView) isCurrentlyDownloading(episode *models.Episode) bool {
-	if v.downloadManager == nil {
-		return false
-	}
-
-	// Check download progress
-	if progress, exists := v.downloadManager.GetDownloadProgress(episode.ID); exists {
-		return progress.Status == download.StatusDownloading && progress.LastError == ""
-	}
-	return false
-}
 
 func (v *QueueView) Draw(s tcell.Screen) {
 	width, height := s.Size()
@@ -378,16 +363,38 @@ func (r *QueueTableRow) GetCell(columnIndex int) string {
 			}
 		}
 
-		if r.isDownloaded {
-			status += " ✔"
-		} else if r.isDownloading {
-			// Get download progress
-			if r.downloadManager != nil {
+		// Check download status dynamically
+		if r.downloadManager != nil {
+			// First check if it's downloaded
+			podcastTitle := ""
+			if r.podcast != nil {
+				podcastTitle = r.podcast.Title
+			}
+			if r.downloadManager.IsEpisodeDownloaded(r.episode, podcastTitle) {
+				status += " ✔"
+			} else if r.downloadManager.IsDownloading(r.episode.ID) {
+				// Check download progress
 				if progress, exists := r.downloadManager.GetDownloadProgress(r.episode.ID); exists {
-					progressPct := int(progress.Progress * 100)
-					status += fmt.Sprintf(" [%d%%]", progressPct)
+					switch progress.Status {
+					case download.StatusDownloading:
+						progressPct := int(progress.Progress * 100)
+						status += fmt.Sprintf(" [⬇%d%%]", progressPct)
+					case download.StatusQueued:
+						status += " [⏸]"
+					case download.StatusFailed:
+						status += " [⚠]"
+					default:
+						status += " [⬇]"
+					}
 				} else {
 					status += " [⬇]"
+				}
+			} else {
+				// Check for failed downloads
+				if progress, exists := r.downloadManager.GetDownloadProgress(r.episode.ID); exists {
+					if progress.Status == download.StatusFailed {
+						status += " [⚠]"
+					}
 				}
 			}
 		}

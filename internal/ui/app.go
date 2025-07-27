@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -40,6 +41,11 @@ type App struct {
 	shutdownOnce    sync.Once
 	positionTicker  *time.Ticker
 	positionUpdate  chan struct{}
+	
+	// Refresh management
+	refreshSemaphore chan struct{}
+	activeRefreshes  map[string]bool // Track which podcasts are currently refreshing
+	refreshMutex     sync.Mutex      // Protect activeRefreshes map
 }
 
 type Mode int
@@ -65,13 +71,15 @@ func NewApp() *App {
 	configDir = filepath.Join(configDir, "podcast-tui")
 
 	app := &App{
-		quit:           make(chan struct{}),
-		mode:           ModeNormal,
-		player:         player.New(),
-		helpDialog:     NewHelpDialog(),
-		confirmDialog:  NewConfirmationDialog(),
-		configDir:      configDir,
-		positionUpdate: make(chan struct{}, 1),
+		quit:             make(chan struct{}),
+		mode:             ModeNormal,
+		player:           player.New(),
+		helpDialog:       NewHelpDialog(),
+		confirmDialog:    NewConfirmationDialog(),
+		configDir:        configDir,
+		positionUpdate:   make(chan struct{}, 1),
+		refreshSemaphore: make(chan struct{}, 10), // Allow up to 10 concurrent refreshes
+		activeRefreshes:  make(map[string]bool),
 	}
 
 	// Initialize download manager
@@ -225,15 +233,21 @@ func (a *App) handleEvents() {
 		case <-a.positionUpdate:
 			// Update position display
 			a.updateCurrentPosition()
-			// Update the position column in current view
-			if a.currentView == a.episodes {
-				a.episodes.UpdateCurrentEpisodePosition(a.screen)
-				a.drawStatusBar() // Also update the status bar
-				a.screen.Show()
-			} else if a.currentView == a.queue {
-				a.queue.UpdateCurrentEpisodePosition(a.screen)
-				a.drawStatusBar() // Also update the status bar
-				a.screen.Show()
+			
+			// If a modal is visible, we need to do a full redraw to keep it on screen
+			if a.helpDialog.IsVisible() || a.confirmDialog.IsVisible() {
+				a.draw()
+			} else {
+				// Update the position column in current view
+				if a.currentView == a.episodes {
+					a.episodes.UpdateCurrentEpisodePosition(a.screen)
+					a.drawStatusBar() // Also update the status bar
+					a.screen.Show()
+				} else if a.currentView == a.queue {
+					a.queue.UpdateCurrentEpisodePosition(a.screen)
+					a.drawStatusBar() // Also update the status bar
+					a.screen.Show()
+				}
 			}
 		case ev, ok := <-eventChan:
 			if !ok {
@@ -539,6 +553,11 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 						go a.downloadEpisode(episode)
 						return true
 					}
+				} else if a.currentView == a.queue {
+					if episode := a.queue.GetSelected(); episode != nil {
+						go a.downloadEpisode(episode)
+						return true
+					}
 				}
 			case 'u':
 				// Remove from queue
@@ -628,6 +647,11 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 					}
 				} else if a.currentView == a.episodes {
 					if episode := a.episodes.GetSelected(); episode != nil {
+						a.confirmEpisodeDeletion(episode)
+						return true
+					}
+				} else if a.currentView == a.queue {
+					if episode := a.queue.GetSelected(); episode != nil {
 						a.confirmEpisodeDeletion(episode)
 						return true
 					}
@@ -929,18 +953,59 @@ func (a *App) handleProgress() {
 	saveCounter := 0
 	var lastEpisodeID string
 	completionTriggered := false
+	var lastPlayerState player.PlayerState = player.StateStopped
 
 	for progress := range a.player.Progress() {
 		// Don't redraw the entire screen - just update the status bar
 		// The position ticker handles updating the episode list view
-		a.drawStatusBar()
-		a.screen.Show()
+		// But if a modal is visible, skip partial updates to avoid overwriting it
+		if !a.helpDialog.IsVisible() && !a.confirmDialog.IsVisible() {
+			a.drawStatusBar()
+			a.screen.Show()
+		}
+
+		// Get current player state
+		currentPlayerState := a.player.GetState()
 
 		// Reset completion trigger when episode changes
 		if a.currentEpisode != nil && a.currentEpisode.ID != lastEpisodeID {
 			lastEpisodeID = a.currentEpisode.ID
 			completionTriggered = false
+			lastPlayerState = currentPlayerState
 		}
+
+		// Check if player just stopped (state changed from playing/paused to stopped)
+		if !completionTriggered && a.currentEpisode != nil && 
+			(lastPlayerState == player.StatePlaying || lastPlayerState == player.StatePaused) &&
+			currentPlayerState == player.StateStopped {
+			// Player just stopped - check if we were near the end
+			if progress.Duration > 0 && progress.Position > 0 {
+				timeRemaining := progress.Duration - progress.Position
+				percentComplete := float64(progress.Position) / float64(progress.Duration) * 100
+				
+				// If we're within 5 seconds of the end, consider it complete
+				if timeRemaining < 5*time.Second || percentComplete >= 98 {
+					log.Printf("Episode completion detected via state change! Position: %v, Duration: %v, State: %v",
+						progress.Position, progress.Duration, currentPlayerState)
+					
+					// Check if there's a next episode in queue
+					if nextEpisode := a.subscriptions.GetNextInQueue(); nextEpisode != nil {
+						log.Printf("Next episode in queue: %s", nextEpisode.Title)
+						completionTriggered = true
+						go func() {
+							// Give a brief pause before advancing
+							time.Sleep(500 * time.Millisecond)
+							a.playNextInQueue()
+						}()
+					} else {
+						// No more episodes in queue
+						log.Printf("Episode ended, no more episodes in queue")
+						completionTriggered = true
+					}
+				}
+			}
+		}
+		lastPlayerState = currentPlayerState
 
 		// Check for episode completion (position >= duration, meaning episode has ended)
 		if !completionTriggered && progress.Duration > 0 {
@@ -1244,48 +1309,80 @@ func (a *App) refreshFeeds() {
 		return
 	}
 
-	successCount := 0
-	for i, podcast := range a.subscriptions.Podcasts {
-		// Calculate percentage
-		percentage := int(float64(i+1) / float64(totalPodcasts) * 100)
-
-		// Update progress indicator with percentage and current podcast
-		a.statusMessage = fmt.Sprintf("Refreshing feeds... %d%% (%d/%d) %s",
-			percentage, i+1, totalPodcasts, podcast.Title)
-		a.draw() // Force redraw to show progress immediately
-
-		updated, err := feed.ParseFeed(podcast.URL)
-		if err != nil {
-			log.Printf("Failed to refresh %s: %v", podcast.Title, err)
-			a.statusMessage = fmt.Sprintf("Refreshing feeds... %d%% (%d/%d) Failed: %s",
-				percentage, i+1, totalPodcasts, podcast.Title)
-			a.draw()                           // Show error briefly
-			time.Sleep(500 * time.Millisecond) // Brief pause to show error
+	// Create wait group for concurrent refreshes
+	var wg sync.WaitGroup
+	successCount := int32(0)
+	processedCount := int32(0)
+	
+	startTime := time.Now()
+	
+	// Start concurrent refreshes for all podcasts
+	for _, podcast := range a.subscriptions.Podcasts {
+		// Skip if already refreshing
+		a.refreshMutex.Lock()
+		if a.activeRefreshes[podcast.URL] {
+			a.refreshMutex.Unlock()
+			atomic.AddInt32(&processedCount, 1)
 			continue
 		}
-		a.mergePodcastData(podcast, updated)
-		successCount++
-
-		// Brief pause between refreshes to show progress
-		if i < totalPodcasts-1 { // Don't pause after the last one
-			time.Sleep(100 * time.Millisecond)
+		a.activeRefreshes[podcast.URL] = true
+		a.refreshMutex.Unlock()
+		
+		wg.Add(1)
+		go func(p *models.Podcast) {
+			defer wg.Done()
+			
+			// Acquire semaphore slot
+			a.refreshSemaphore <- struct{}{}
+			defer func() {
+				<-a.refreshSemaphore
+				a.refreshMutex.Lock()
+				delete(a.activeRefreshes, p.URL)
+				a.refreshMutex.Unlock()
+			}()
+			
+			// Update progress
+			current := atomic.AddInt32(&processedCount, 1)
+			percentage := (current * 100) / int32(totalPodcasts)
+			a.statusMessage = fmt.Sprintf("Refreshing feeds... %d%% (%d/%d)",
+				percentage, current, totalPodcasts)
+			a.draw()
+			
+			// Parse the feed
+			updated, err := feed.ParseFeed(p.URL)
+			if err != nil {
+				log.Printf("Failed to refresh %s: %v", p.Title, err)
+				return
+			}
+			
+			// Merge the updated data
+			a.mergePodcastData(p, updated)
+			atomic.AddInt32(&successCount, 1)
+		}(podcast)
+	}
+	
+	// Wait for all refreshes to complete
+	wg.Wait()
+	
+	// Save subscriptions
+	if err := a.subscriptions.Save(); err != nil {
+		log.Printf("Failed to save subscriptions: %v", err)
+		a.statusMessage = "Error saving subscriptions"
+	} else {
+		// Show completion status
+		elapsed := time.Since(startTime).Round(time.Second)
+		failedCount := totalPodcasts - int(successCount)
+		if failedCount > 0 {
+			a.statusMessage = fmt.Sprintf("Refresh complete in %v: %d succeeded, %d failed",
+				elapsed, successCount, failedCount)
+		} else {
+			a.statusMessage = fmt.Sprintf("All %d podcasts refreshed successfully in %v",
+				successCount, elapsed)
 		}
 	}
 
-	if err := a.subscriptions.Save(); err != nil {
-		log.Printf("Failed to save subscriptions: %v", err)
-	}
-
+	// Update podcasts view
 	a.podcasts.SetSubscriptions(a.subscriptions)
-
-	// Final status message with summary
-	if successCount == totalPodcasts {
-		a.statusMessage = fmt.Sprintf("All %d feeds refreshed successfully", totalPodcasts)
-	} else {
-		failedCount := totalPodcasts - successCount
-		a.statusMessage = fmt.Sprintf("Refreshed %d/%d feeds (%d failed)",
-			successCount, totalPodcasts, failedCount)
-	}
 
 	// Update UI to show refreshed episode counts
 	a.draw()
@@ -1293,6 +1390,28 @@ func (a *App) refreshFeeds() {
 
 // refreshSinglePodcast refreshes just one podcast's feed
 func (a *App) refreshSinglePodcast(podcast *models.Podcast) {
+	// Check if this podcast is already being refreshed
+	a.refreshMutex.Lock()
+	if a.activeRefreshes[podcast.URL] {
+		a.refreshMutex.Unlock()
+		a.statusMessage = fmt.Sprintf("%s is already refreshing", podcast.Title)
+		a.draw()
+		return
+	}
+	a.activeRefreshes[podcast.URL] = true
+	a.refreshMutex.Unlock()
+
+	// Acquire semaphore slot
+	a.refreshSemaphore <- struct{}{}
+	
+	// Ensure cleanup
+	defer func() {
+		<-a.refreshSemaphore
+		a.refreshMutex.Lock()
+		delete(a.activeRefreshes, podcast.URL)
+		a.refreshMutex.Unlock()
+	}()
+
 	// Parse the feed
 	updated, err := feed.ParseFeed(podcast.URL)
 	if err != nil {
@@ -1353,8 +1472,13 @@ func (a *App) saveEpisodePosition() {
 
 						// Immediately update the UI to show the new duration
 						if a.currentView == a.episodes {
-							a.episodes.UpdateCurrentEpisodePosition(a.screen)
-							a.screen.Show()
+							// Check for modals before updating
+							if a.helpDialog.IsVisible() || a.confirmDialog.IsVisible() {
+								a.draw()
+							} else {
+								a.episodes.UpdateCurrentEpisodePosition(a.screen)
+								a.screen.Show()
+							}
 						}
 					}
 				}
@@ -1558,8 +1682,13 @@ func (a *App) playEpisode(episode *models.Episode) {
 
 						// Immediately update the UI to show the new duration
 						if a.currentView == a.episodes {
-							a.episodes.UpdateCurrentEpisodePosition(a.screen)
-							a.screen.Show()
+							// Check for modals before updating
+							if a.helpDialog.IsVisible() || a.confirmDialog.IsVisible() {
+								a.draw()
+							} else {
+								a.episodes.UpdateCurrentEpisodePosition(a.screen)
+								a.screen.Show()
+							}
 						}
 
 						// Save immediately to persist the duration
@@ -1647,8 +1776,13 @@ func (a *App) playEpisode(episode *models.Episode) {
 
 					// Immediately update the UI to show the new duration
 					if a.currentView == a.episodes {
-						a.episodes.UpdateCurrentEpisodePosition(a.screen)
-						a.screen.Show()
+						// Check for modals before updating
+						if a.helpDialog.IsVisible() || a.confirmDialog.IsVisible() {
+							a.draw()
+						} else {
+							a.episodes.UpdateCurrentEpisodePosition(a.screen)
+							a.screen.Show()
+						}
 					}
 
 					// Save immediately to persist the duration
@@ -1925,6 +2059,11 @@ func (a *App) downloadEpisode(episode *models.Episode) {
 		if podcast := a.episodes.GetCurrentPodcast(); podcast != nil {
 			podcastTitle = podcast.Title
 		}
+	} else if a.currentView == a.queue {
+		// Get podcast from subscriptions for queue items
+		if podcast := a.subscriptions.GetPodcastForEpisode(episode.ID); podcast != nil {
+			podcastTitle = podcast.Title
+		}
 	}
 
 	// Check if episode is already downloaded (comprehensive check: filesystem + registry)
@@ -1975,6 +2114,11 @@ func (a *App) startEpisodeDownload(episode *models.Episode) {
 	podcastTitle := ""
 	if a.currentView == a.episodes {
 		if podcast := a.episodes.GetCurrentPodcast(); podcast != nil {
+			podcastTitle = podcast.Title
+		}
+	} else if a.currentView == a.queue {
+		// Get podcast from subscriptions for queue items
+		if podcast := a.subscriptions.GetPodcastForEpisode(episode.ID); podcast != nil {
 			podcastTitle = podcast.Title
 		}
 	}

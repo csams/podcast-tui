@@ -404,13 +404,12 @@ func (t *Table) drawHeader(s tcell.Screen, y int) {
 			x++ // Add padding between columns
 		}
 		
-		// Skip drawing header for first column if it's just selection indicator
-		if i == 0 && t.selectionIndicator != "" {
-			// Just move x position
-			x += len([]rune(t.selectionIndicator))
-		}
-		
-		if col.Title != "" {
+		// For the first column with selection indicator, adjust the title position
+		if i == 0 && t.selectionIndicator != "" && col.Title != "" {
+			// Draw the title after the selection indicator space
+			indicatorWidth := len([]rune(t.selectionIndicator))
+			t.drawText(s, x+indicatorWidth, y, t.columnWidths[i]-indicatorWidth, col.Title, t.headerStyle, col.Align)
+		} else if col.Title != "" {
 			t.drawText(s, x, y, t.columnWidths[i], col.Title, t.headerStyle, col.Align)
 		}
 		

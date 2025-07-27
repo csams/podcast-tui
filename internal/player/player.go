@@ -88,6 +88,7 @@ func (p *Player) StartIdle() error {
 		fmt.Sprintf("--input-ipc-server=%s", p.socketPath),
 		"--idle",
 		"--force-window=no",
+		"--keep-open=no",
 	)
 
 	if err := p.cmd.Start(); err != nil {
@@ -824,16 +825,23 @@ func (p *Player) watchProgress() {
 								Position: p.position,
 								Duration: p.duration,
 							}
-							p.state = StateStopped
+							// Don't set state to stopped yet - let app handle the completion first
 							p.mu.Unlock()
 							
-							// Send final progress update
+							// Send final progress update BEFORE setting state to stopped
 							select {
 							case p.progressCh <- finalProgress:
+								// Give app time to process the completion
+								time.Sleep(100 * time.Millisecond)
 							default:
 							}
 							
 							log.Printf("Player: Episode ended (mpv is idle)")
+							
+							// Now set state to stopped
+							p.mu.Lock()
+							p.state = StateStopped
+							p.mu.Unlock()
 							return
 						}
 					}
@@ -859,16 +867,23 @@ func (p *Player) watchProgress() {
 										Position: p.position,
 										Duration: p.duration,
 									}
-									p.state = StateStopped
+									// Don't set state to stopped yet
 									p.mu.Unlock()
 									
-									// Send final progress update
+									// Send final progress update BEFORE setting state to stopped
 									select {
 									case p.progressCh <- finalProgress:
+										// Give app time to process the completion
+										time.Sleep(100 * time.Millisecond)
 									default:
 									}
 									
 									log.Printf("Player: Episode ended (EOF reached, time-remaining: %.2f)", remaining)
+									
+									// Now set state to stopped
+									p.mu.Lock()
+									p.state = StateStopped
+									p.mu.Unlock()
 									return
 								}
 							}

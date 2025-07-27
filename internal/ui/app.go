@@ -978,30 +978,24 @@ func (a *App) handleProgress() {
 		if !completionTriggered && a.currentEpisode != nil && 
 			(lastPlayerState == player.StatePlaying || lastPlayerState == player.StatePaused) &&
 			currentPlayerState == player.StateStopped {
-			// Player just stopped - check if we were near the end
-			if progress.Duration > 0 && progress.Position > 0 {
-				timeRemaining := progress.Duration - progress.Position
-				percentComplete := float64(progress.Position) / float64(progress.Duration) * 100
+			// Player just stopped - check if we're at the end
+			if progress.Duration > 0 && progress.Position >= progress.Duration {
+				log.Printf("Episode completion detected via state change! Position: %v, Duration: %v",
+					progress.Position, progress.Duration)
 				
-				// If we're within 5 seconds of the end, consider it complete
-				if timeRemaining < 5*time.Second || percentComplete >= 98 {
-					log.Printf("Episode completion detected via state change! Position: %v, Duration: %v, State: %v",
-						progress.Position, progress.Duration, currentPlayerState)
-					
-					// Check if there's a next episode in queue
-					if nextEpisode := a.subscriptions.GetNextInQueue(); nextEpisode != nil {
-						log.Printf("Next episode in queue: %s", nextEpisode.Title)
-						completionTriggered = true
-						go func() {
-							// Give a brief pause before advancing
-							time.Sleep(500 * time.Millisecond)
-							a.playNextInQueue()
-						}()
-					} else {
-						// No more episodes in queue
-						log.Printf("Episode ended, no more episodes in queue")
-						completionTriggered = true
-					}
+				// Check if there's a next episode in queue
+				if nextEpisode := a.subscriptions.GetNextInQueue(); nextEpisode != nil {
+					log.Printf("Next episode in queue: %s", nextEpisode.Title)
+					completionTriggered = true
+					go func() {
+						// Give a brief pause before advancing
+						time.Sleep(500 * time.Millisecond)
+						a.playNextInQueue()
+					}()
+				} else {
+					// No more episodes in queue
+					log.Printf("Episode ended, no more episodes in queue")
+					completionTriggered = true
 				}
 			}
 		}

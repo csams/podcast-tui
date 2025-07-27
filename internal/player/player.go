@@ -34,6 +34,8 @@ type Player struct {
 	progressCh chan Progress
 	socketPath string
 	watchOnce  sync.Once
+	eventConn  net.Conn
+	eventStop  chan struct{}
 }
 
 type Progress struct {
@@ -50,6 +52,12 @@ type mpvResponse struct {
 	Data      interface{} `json:"data"`
 	RequestID int         `json:"request_id"`
 	Error     string      `json:"error"`
+}
+
+type mpvEvent struct {
+	Event string      `json:"event"`
+	ID    int         `json:"id,omitempty"`
+	Data  interface{} `json:"data,omitempty"`
 }
 
 func New() *Player {
@@ -188,6 +196,13 @@ func (p *Player) Play(url string) error {
 				log.Printf("Warning: failed to unpause after loading file: %v", err)
 			}
 			
+			// Start event listener if not already running
+			if p.eventConn == nil {
+				if err := p.startEventListener(); err != nil {
+					log.Printf("Warning: failed to start event listener: %v", err)
+				}
+			}
+			
 			p.state = StatePlaying
 			go p.watchProgress()
 			return nil
@@ -248,6 +263,11 @@ func (p *Player) Play(url string) error {
 		p.cmd.Process.Kill()
 		p.cmd.Wait()
 		return fmt.Errorf("failed to load file: %w", err)
+	}
+
+	// Start event listener BEFORE verifying playback
+	if err := p.startEventListener(); err != nil {
+		log.Printf("Warning: failed to start event listener: %v", err)
 	}
 
 	// Verify playback actually started
@@ -413,6 +433,20 @@ func (p *Player) StopKeepIdle() error {
 		}
 	}
 
+	// Stop event listener
+	if p.eventStop != nil {
+		select {
+		case <-p.eventStop:
+			// Already closed
+		default:
+			close(p.eventStop)
+		}
+	}
+	if p.eventConn != nil {
+		p.eventConn.Close()
+		p.eventConn = nil
+	}
+
 	// Reset playback state
 	p.position = 0
 	p.duration = 0
@@ -437,6 +471,20 @@ func (p *Player) stop() error {
 		default:
 			close(p.stopCh)
 		}
+	}
+
+	// Stop event listener
+	if p.eventStop != nil {
+		select {
+		case <-p.eventStop:
+			// Already closed
+		default:
+			close(p.eventStop)
+		}
+	}
+	if p.eventConn != nil {
+		p.eventConn.Close()
+		p.eventConn = nil
 	}
 
 	if p.cmd != nil && p.cmd.Process != nil {
@@ -810,86 +858,6 @@ func (p *Player) watchProgress() {
 				p.mu.Unlock()
 				
 				if currentState == StatePlaying || currentState == StatePaused {
-					// First check if mpv is idle (no file playing)
-					idleCmd := mpvCommand{
-						Command: []interface{}{"get_property", "idle-active"},
-					}
-					if resp, err := p.sendCommand(idleCmd); err == nil {
-						if idle, ok := resp.Data.(bool); ok && idle {
-							// mpv has become idle, meaning playback has ended
-							p.mu.Lock()
-							if p.duration > 0 {
-								p.position = p.duration
-							}
-							finalProgress := Progress{
-								Position: p.position,
-								Duration: p.duration,
-							}
-							// Don't set state to stopped yet - let app handle the completion first
-							p.mu.Unlock()
-							
-							// Send final progress update BEFORE setting state to stopped
-							select {
-							case p.progressCh <- finalProgress:
-								// Give app time to process the completion
-								time.Sleep(100 * time.Millisecond)
-							default:
-							}
-							
-							log.Printf("Player: Episode ended (mpv is idle)")
-							
-							// Now set state to stopped
-							p.mu.Lock()
-							p.state = StateStopped
-							p.mu.Unlock()
-							return
-						}
-					}
-					
-					// Check if playback has ended (eof-reached)
-					eofCmd := mpvCommand{
-						Command: []interface{}{"get_property", "eof-reached"},
-					}
-					if resp, err := p.sendCommand(eofCmd); err == nil {
-						if eofReached, ok := resp.Data.(bool); ok && eofReached {
-							// Also check time-remaining to confirm we're at the end
-							remainCmd := mpvCommand{
-								Command: []interface{}{"get_property", "time-remaining"},
-							}
-							if remainResp, err := p.sendCommand(remainCmd); err == nil {
-								if remaining, ok := remainResp.Data.(float64); ok && remaining <= 0 {
-									// Episode has ended, send final progress update with position = duration
-									p.mu.Lock()
-									if p.duration > 0 {
-										p.position = p.duration
-									}
-									finalProgress := Progress{
-										Position: p.position,
-										Duration: p.duration,
-									}
-									// Don't set state to stopped yet
-									p.mu.Unlock()
-									
-									// Send final progress update BEFORE setting state to stopped
-									select {
-									case p.progressCh <- finalProgress:
-										// Give app time to process the completion
-										time.Sleep(100 * time.Millisecond)
-									default:
-									}
-									
-									log.Printf("Player: Episode ended (EOF reached, time-remaining: %.2f)", remaining)
-									
-									// Now set state to stopped
-									p.mu.Lock()
-									p.state = StateStopped
-									p.mu.Unlock()
-									return
-								}
-							}
-						}
-					}
-					
 					// Get position
 					cmd := mpvCommand{
 						Command: []interface{}{"get_property", "time-pos"},
@@ -940,4 +908,97 @@ func (p *Player) watchProgress() {
 			}
 		}
 	})
+}
+
+// startEventListener starts listening for mpv events
+func (p *Player) startEventListener() error {
+	// Connect to mpv socket for events
+	conn, err := net.Dial("unix", p.socketPath)
+	if err != nil {
+		return fmt.Errorf("failed to connect for events: %w", err)
+	}
+
+	// Enable event notifications
+	enableCmd := mpvCommand{
+		Command: []interface{}{"enable_event", "end-file"},
+	}
+	data, _ := json.Marshal(enableCmd)
+	data = append(data, '\n')
+	if _, err := conn.Write(data); err != nil {
+		conn.Close()
+		return fmt.Errorf("failed to enable events: %w", err)
+	}
+
+	// Store connection and start event handler
+	p.eventConn = conn
+	p.eventStop = make(chan struct{})
+	go p.handleEvents()
+
+	return nil
+}
+
+// handleEvents processes mpv events
+func (p *Player) handleEvents() {
+	if p.eventConn == nil {
+		return
+	}
+	defer p.eventConn.Close()
+
+	reader := bufio.NewReader(p.eventConn)
+	for {
+		select {
+		case <-p.eventStop:
+			return
+		default:
+			// Set read timeout
+			p.eventConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			
+			line, err := reader.ReadBytes('\n')
+			if err != nil {
+				// Timeout is normal, continue
+				if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+					continue
+				}
+				// Other errors mean connection is broken
+				log.Printf("Event reader error: %v", err)
+				return
+			}
+
+			var event mpvEvent
+			if err := json.Unmarshal(line, &event); err != nil {
+				continue // Skip malformed events
+			}
+
+			// Handle end-file event
+			if event.Event == "end-file" {
+				log.Printf("Player: Received end-file event")
+				
+				// Send final progress with position = duration
+				p.mu.Lock()
+				if p.duration > 0 {
+					p.position = p.duration
+				}
+				finalProgress := Progress{
+					Position: p.position,
+					Duration: p.duration,
+				}
+				p.mu.Unlock()
+
+				// Send progress update immediately
+				select {
+				case p.progressCh <- finalProgress:
+					log.Printf("Player: Sent final progress (pos=%v, dur=%v)", finalProgress.Position, finalProgress.Duration)
+				default:
+					log.Printf("Player: Failed to send final progress (channel full)")
+				}
+
+				// Wait a bit for app to process, then update state
+				time.Sleep(200 * time.Millisecond)
+				
+				p.mu.Lock()
+				p.state = StateStopped
+				p.mu.Unlock()
+			}
+		}
+	}
 }

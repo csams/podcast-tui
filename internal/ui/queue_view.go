@@ -399,6 +399,11 @@ func (r *QueueTableRow) GetCell(columnIndex int) string {
 			}
 		}
 
+		// Check for notes
+		if r.noteExists() {
+			status += " ✎"
+		}
+
 		return status
 	case 1: // Podcast
 		if r.podcast != nil {
@@ -455,4 +460,12 @@ func formatQueueDuration(d time.Duration) string {
 		return fmt.Sprintf("%d:%02d:%02d", hours, minutes, seconds)
 	}
 	return fmt.Sprintf("%d:%02d", minutes, seconds)
+}
+
+func (r *QueueTableRow) noteExists() bool {
+	// Use the shared NoteExists function
+	if r.podcast != nil {
+		return NoteExists(r.episode, r.podcast.Title, r.downloadManager)
+	}
+	return false
 }

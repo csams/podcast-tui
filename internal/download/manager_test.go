@@ -552,33 +552,35 @@ func TestManager_ConcurrentDownloads(t *testing.T) {
 	}
 }
 
-func TestManager_GeneratePodcastHash(t *testing.T) {
+func TestManager_GeneratePodcastDirectory(t *testing.T) {
 	tempDir := t.TempDir()
 	manager := NewManager(tempDir)
 
-	// Test consistent hashing
-	hash1 := manager.generatePodcastHash("Test Podcast")
-	hash2 := manager.generatePodcastHash("Test Podcast")
+	// Test consistent directory naming
+	dir1 := manager.GeneratePodcastDirectory("Test Podcast")
+	dir2 := manager.GeneratePodcastDirectory("Test Podcast")
 
-	if hash1 != hash2 {
-		t.Error("Expected consistent hash for same podcast title")
+	if dir1 != dir2 {
+		t.Error("Expected consistent directory name for same podcast title")
 	}
 
-	// Test different titles produce different hashes
-	hash3 := manager.generatePodcastHash("Different Podcast")
-	if hash1 == hash3 {
-		t.Error("Expected different hashes for different podcast titles")
+	// Test different titles produce different directory names
+	dir3 := manager.GeneratePodcastDirectory("Different Podcast")
+	if dir1 == dir3 {
+		t.Error("Expected different directory names for different podcast titles")
 	}
 
-	// Test case insensitive and whitespace handling
-	hash4 := manager.generatePodcastHash("  TEST PODCAST  ")
-	if hash1 != hash4 {
-		t.Error("Expected same hash for case-insensitive and trimmed title")
+	// Test whitespace handling
+	dir4 := manager.GeneratePodcastDirectory("  Test Podcast  ")
+	if dir1 != dir4 {
+		t.Error("Expected same directory name for trimmed title")
 	}
 
-	// Test hash length
-	if len(hash1) != 12 {
-		t.Errorf("Expected hash length 12, got %d", len(hash1))
+	// Test sanitization
+	dir5 := manager.GeneratePodcastDirectory("Test: Podcast!")
+	expected := "Test__Podcast_"
+	if dir5 != expected {
+		t.Errorf("Expected sanitized directory name '%s', got '%s'", expected, dir5)
 	}
 }
 
@@ -591,7 +593,7 @@ func TestManager_GenerateFilename(t *testing.T) {
 		Title: "My Test Episode!",
 	}
 
-	filename := manager.generateFilename(episode)
+	filename := manager.GenerateFilename(episode)
 	expected := "My_Test_Episode.mp3"
 
 	if filename != expected {

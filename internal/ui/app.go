@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -38,6 +39,7 @@ type App struct {
 	helpDialog      *HelpDialog
 	confirmDialog   *ConfirmationDialog
 	configDir       string
+	settings        *Settings
 	shutdownOnce    sync.Once
 	positionTicker  *time.Ticker
 	positionUpdate  chan struct{}
@@ -84,6 +86,14 @@ func NewApp() *App {
 
 	// Initialize download manager
 	app.downloadManager = download.NewManager(configDir)
+
+	// Load settings
+	settings, err := LoadSettings(configDir)
+	if err != nil {
+		log.Printf("Failed to load settings, using defaults: %v", err)
+		settings = DefaultSettings()
+	}
+	app.settings = settings
 
 	return app
 }
@@ -557,6 +567,23 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 					if episode := a.queue.GetSelected(); episode != nil {
 						go a.downloadEpisode(episode)
 						return true
+					}
+				}
+			case 'n':
+				// Open note editor for selected episode
+				if a.currentView == a.episodes {
+					if episode := a.episodes.GetSelected(); episode != nil {
+						if podcast := a.episodes.GetCurrentPodcast(); podcast != nil {
+							a.openNoteEditor(episode, podcast.Title)
+							return true
+						}
+					}
+				} else if a.currentView == a.queue {
+					if episode := a.queue.GetSelected(); episode != nil {
+						if podcast := a.subscriptions.GetPodcastForEpisode(episode.ID); podcast != nil {
+							a.openNoteEditor(episode, podcast.Title)
+							return true
+						}
 					}
 				}
 			case 'u':
@@ -2425,4 +2452,115 @@ func (a *App) updateCurrentPosition() {
 			a.currentEpisode.Position = position
 		}
 	}
+}
+
+// openNoteEditor opens nvim to edit notes for an episode
+func (a *App) openNoteEditor(episode *models.Episode, podcastTitle string) {
+	// Generate note file path
+	notePath, err := a.generateNotePath(episode, podcastTitle)
+	if err != nil {
+		a.statusMessage = "Failed to generate note path: " + err.Error()
+		return
+	}
+	
+	// Prepare terminal arguments, replacing {file} placeholder
+	args := make([]string, len(a.settings.TerminalArgs))
+	for i, arg := range a.settings.TerminalArgs {
+		if arg == "{file}" {
+			args[i] = notePath
+		} else {
+			// Handle case where file path is embedded in argument (e.g., "nvim {file}")
+			args[i] = strings.ReplaceAll(arg, "{file}", notePath)
+		}
+	}
+	
+	// Try configured terminal first
+	var cmd *exec.Cmd
+	if _, err := exec.LookPath(a.settings.Terminal); err == nil {
+		cmd = exec.Command(a.settings.Terminal, args...)
+	} else {
+		// Fallback to common terminals if configured one is not found
+		terminals := []struct {
+			name string
+			args []string
+		}{
+			{"kitty", []string{"nvim", notePath}},
+			{"gnome-terminal", []string{"--", "nvim", notePath}},
+			{"konsole", []string{"-e", "nvim", notePath}},
+			{"xfce4-terminal", []string{"-e", "nvim " + notePath}},
+			{"xterm", []string{"-e", "nvim", notePath}},
+			{"alacritty", []string{"-e", "nvim", notePath}},
+			{"wezterm", []string{"start", "--", "nvim", notePath}},
+			{"foot", []string{"nvim", notePath}},
+		}
+		
+		var termFound bool
+		for _, term := range terminals {
+			if _, err := exec.LookPath(term.name); err == nil {
+				cmd = exec.Command(term.name, term.args...)
+				termFound = true
+				a.statusMessage = fmt.Sprintf("Terminal '%s' not found, using %s", a.settings.Terminal, term.name)
+				log.Printf("Configured terminal '%s' not found, falling back to %s", a.settings.Terminal, term.name)
+				break
+			}
+		}
+		
+		if !termFound {
+			// Last resort fallbacks
+			if _, err := exec.LookPath("x-terminal-emulator"); err == nil {
+				cmd = exec.Command("x-terminal-emulator", "-e", "nvim", notePath)
+			} else if _, err := exec.LookPath("open"); err == nil {
+				// macOS - use Terminal.app
+				cmd = exec.Command("open", "-a", "Terminal", notePath)
+			} else {
+				a.statusMessage = "No terminal emulator found"
+				return
+			}
+		}
+	}
+	
+	// Start the terminal in the background
+	err = cmd.Start()
+	
+	if err != nil {
+		a.statusMessage = "Failed to open editor: " + err.Error()
+	} else {
+		a.statusMessage = fmt.Sprintf("Editing note: %s", episode.Title)
+	}
+}
+
+// generateNotePath creates the full path for a note file
+func (a *App) generateNotePath(episode *models.Episode, podcastTitle string) (string, error) {
+	// Use the same path generation as download manager to ensure consistency
+	// Notes are stored alongside downloaded episodes
+	downloadDir := a.downloadManager.GetDownloadDir()
+	podcastDir := a.downloadManager.GeneratePodcastDirectory(podcastTitle)
+	episodeFilename := a.downloadManager.GenerateFilename(episode)
+	noteFilename := strings.TrimSuffix(episodeFilename, ".mp3") + ".md"
+	noteDir := filepath.Join(downloadDir, podcastDir)
+	
+	// Create directory if it doesn't exist
+	if err := os.MkdirAll(noteDir, 0755); err != nil {
+		return "", err
+	}
+	
+	return filepath.Join(noteDir, noteFilename), nil
+}
+
+
+// NoteExists checks if a note file exists for an episode
+func NoteExists(episode *models.Episode, podcastTitle string, downloadManager *download.Manager) bool {
+	if episode == nil || podcastTitle == "" || downloadManager == nil {
+		return false
+	}
+	
+	// Generate note path using download manager's methods
+	downloadDir := downloadManager.GetDownloadDir()
+	podcastDir := downloadManager.GeneratePodcastDirectory(podcastTitle)
+	episodeFilename := downloadManager.GenerateFilename(episode)
+	noteFilename := strings.TrimSuffix(episodeFilename, ".mp3") + ".md"
+	notePath := filepath.Join(downloadDir, podcastDir, noteFilename)
+	
+	_, err := os.Stat(notePath)
+	return err == nil
 }

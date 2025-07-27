@@ -119,6 +119,11 @@ func (r *EpisodeTableRow) getDownloadIndicator() string {
 		}
 	}
 
+	// Check for notes
+	if r.noteExists() {
+		indicators = append(indicators, "✎")
+	}
+	
 	// Join all indicators with space
 	return strings.Join(indicators, " ")
 }
@@ -154,6 +159,11 @@ func (r *EpisodeTableRow) formatListeningPosition() string {
 	}
 
 	return posStr
+}
+
+func (r *EpisodeTableRow) noteExists() bool {
+	// Use the shared NoteExists function
+	return NoteExists(r.episode, r.podcastTitle, r.downloadManager)
 }
 
 // EpisodeListView is the episode list using the table abstraction

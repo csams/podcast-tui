@@ -143,7 +143,7 @@ func (m *Manager) QueueDownload(episode *models.Episode, podcastTitle string) er
 	ctx, cancel := context.WithCancel(context.Background())
 	task := &DownloadTask{
 		Episode:     episode,
-		PodcastHash: m.generatePodcastHash(podcastTitle),
+		PodcastHash: m.GeneratePodcastDirectory(podcastTitle),
 		Priority:    0,
 		Context:     ctx,
 		Cancel:      cancel,
@@ -339,10 +339,10 @@ func (m *Manager) IsEpisodeDownloaded(episode *models.Episode, podcastTitle stri
 	}
 	
 	// Check if file exists using the actual naming scheme
-	podcastHash := m.generatePodcastHash(podcastTitle)
-	filename := m.generateFilename(episode)
-	podcastDir := filepath.Join(m.configManager.GetDownloadDir(), podcastHash)
-	filePath := filepath.Join(podcastDir, filename)
+	podcastDir := m.GeneratePodcastDirectory(podcastTitle)
+	filename := m.GenerateFilename(episode)
+	fullPath := filepath.Join(m.configManager.GetDownloadDir(), podcastDir)
+	filePath := filepath.Join(fullPath, filename)
 	
 	if _, err := os.Stat(filePath); err == nil {
 		// File exists! Update the episode model and registry to reflect this
@@ -365,6 +365,11 @@ func (m *Manager) RemoveFromRegistry(episodeID string) {
 // GetProgressChannel returns the progress channel for UI updates
 func (m *Manager) GetProgressChannel() <-chan *DownloadProgress {
 	return m.progressCh
+}
+
+// GetDownloadDir returns the configured download directory
+func (m *Manager) GetDownloadDir() string {
+	return m.configManager.GetDownloadDir()
 }
 
 // downloadWorker processes downloads from the queue
@@ -438,7 +443,7 @@ func (m *Manager) processDownload(task *DownloadTask) {
 	}
 
 	// Generate filename
-	filename := m.generateFilename(task.Episode)
+	filename := m.GenerateFilename(task.Episode)
 	podcastDir := filepath.Join(m.configManager.GetDownloadDir(), task.PodcastHash)
 
 	// Ensure podcast directory exists
@@ -593,8 +598,8 @@ func (m *Manager) progressReporter() {
 	}
 }
 
-// generatePodcastHash creates a sanitized directory name for the podcast
-func (m *Manager) generatePodcastHash(podcastTitle string) string {
+// GeneratePodcastDirectory creates a sanitized directory name for the podcast
+func (m *Manager) GeneratePodcastDirectory(podcastTitle string) string {
 	// Sanitize the podcast title for use as a directory name
 	sanitized := strings.TrimSpace(podcastTitle)
 
@@ -618,8 +623,8 @@ func (m *Manager) generatePodcastHash(podcastTitle string) string {
 	sanitized = strings.Trim(sanitized, "_")
 
 	// Limit length to prevent filesystem issues
-	if len(sanitized) > 100 {
-		sanitized = sanitized[:100]
+	if len(sanitized) > 255 {
+		sanitized = sanitized[:255]
 		sanitized = strings.Trim(sanitized, "_")
 	}
 
@@ -633,8 +638,8 @@ func (m *Manager) generatePodcastHash(podcastTitle string) string {
 	return sanitized
 }
 
-// generateFilename creates a filename for an episode
-func (m *Manager) generateFilename(episode *models.Episode) string {
+// GenerateFilename creates a filename for an episode
+func (m *Manager) GenerateFilename(episode *models.Episode) string {
 	// Sanitize episode title for use as filename
 	title := strings.TrimSpace(episode.Title)
 	if title == "" {
@@ -660,9 +665,10 @@ func (m *Manager) generateFilename(episode *models.Episode) string {
 	// Trim underscores from start/end
 	title = strings.Trim(title, "_")
 
-	// Limit length to prevent filesystem issues
-	if len(title) > 150 {
-		title = title[:150]
+	// Limit length to prevent filesystem issues  
+	// Reserve 4 chars for .mp3 extension
+	if len(title) > 251 {
+		title = title[:251]
 		title = strings.Trim(title, "_")
 	}
 

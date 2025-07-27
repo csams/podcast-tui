@@ -1913,10 +1913,10 @@ func (a *App) restartEpisode(episode *models.Episode) {
 // addToQueue adds an episode to the playback queue
 func (a *App) addToQueue(episode *models.Episode) {
 	// Check if episode is already in queue
-	if a.subscriptions.GetQueuePosition(episode.ID) > 0 {
-		// Episode is already in queue, play it immediately
-		a.statusMessage = "Playing from queue"
-		a.playEpisode(episode)
+	if position := a.subscriptions.GetQueuePosition(episode.ID); position > 0 {
+		// Episode is already in queue, just notify the user
+		a.statusMessage = fmt.Sprintf("Episode already in queue at position %d", position)
+		a.draw()
 		return
 	}
 

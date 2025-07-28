@@ -380,6 +380,11 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 					}
 				} else if a.currentView == a.queue {
 					if episode := a.queue.GetSelected(); episode != nil {
+						// Check if an episode is already playing or paused
+						if a.player.GetState() != player.StateStopped {
+							// Episode is playing or paused, do nothing
+							return true
+						}
 						log.Printf("User pressed 'l' in queue - Episode: %s", episode.Title)
 						// Play immediately from queue
 						go a.playEpisode(episode)
@@ -722,6 +727,11 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				}
 			} else if a.currentView == a.queue {
 				if episode := a.queue.GetSelected(); episode != nil {
+					// Check if an episode is already playing or paused
+					if a.player.GetState() != player.StateStopped {
+						// Episode is playing or paused, do nothing
+						return true
+					}
 					log.Printf("User pressed Enter in queue - Episode: %s", episode.Title)
 					// Play immediately from queue
 					go a.playEpisode(episode)
@@ -1014,11 +1024,8 @@ func (a *App) handleProgress() {
 				if nextEpisode := a.subscriptions.GetNextInQueue(); nextEpisode != nil {
 					log.Printf("Next episode in queue: %s", nextEpisode.Title)
 					completionTriggered = true
-					go func() {
-						// Give a brief pause before advancing
-						time.Sleep(500 * time.Millisecond)
-						a.playNextInQueue()
-					}()
+					// Run playNextInQueue directly to ensure proper state transition
+					a.playNextInQueue()
 				} else {
 					// No more episodes in queue
 					log.Printf("Episode ended, no more episodes in queue")
@@ -1049,11 +1056,8 @@ func (a *App) handleProgress() {
 				if nextEpisode := a.subscriptions.GetNextInQueue(); nextEpisode != nil {
 					log.Printf("Next episode in queue: %s", nextEpisode.Title)
 					completionTriggered = true
-					go func() {
-						// Give a brief pause before advancing
-						time.Sleep(500 * time.Millisecond)
-						a.playNextInQueue()
-					}()
+					// Run playNextInQueue directly to ensure proper state transition
+					a.playNextInQueue()
 				} else {
 					// No more episodes in queue
 					log.Printf("Episode ended, no more episodes in queue")
@@ -1566,6 +1570,9 @@ func (a *App) playEpisode(episode *models.Episode) {
 	log.Printf("playEpisode called for: %s", episode.Title)
 	log.Printf("Episode position at start of playEpisode: %v", episode.Position)
 
+	// Stop position ticker to ensure clean state transition
+	a.stopPositionTicker()
+
 	// Save position of current episode if switching
 	if a.currentEpisode != nil && a.currentEpisode.ID != episode.ID {
 		a.saveEpisodePosition()
@@ -1956,6 +1963,9 @@ func (a *App) addToQueue(episode *models.Episode) {
 
 // playNextInQueue plays the next episode in the queue
 func (a *App) playNextInQueue() {
+	// Stop position ticker before transitioning to prevent race conditions
+	a.stopPositionTicker()
+	
 	// Remove current episode from queue
 	if a.currentEpisode != nil {
 		a.subscriptions.RemoveFromQueue(a.currentEpisode.ID)

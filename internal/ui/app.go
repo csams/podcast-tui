@@ -48,6 +48,11 @@ type App struct {
 	refreshSemaphore chan struct{}
 	activeRefreshes  map[string]bool // Track which podcasts are currently refreshing
 	refreshMutex     sync.Mutex      // Protect activeRefreshes map
+	
+	// Episode transition management
+	transitionMutex     sync.Mutex    // Protect episode transitions
+	transitionInProgress bool         // Flag to indicate transition is happening
+	completionHandled   atomic.Bool   // Atomic flag to prevent double completion handling
 }
 
 type Mode int
@@ -373,6 +378,15 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 					}
 				} else if a.currentView == a.episodes {
 					if episode := a.episodes.GetSelected(); episode != nil {
+						// Check if transition is in progress
+						a.transitionMutex.Lock()
+						if a.transitionInProgress {
+							a.transitionMutex.Unlock()
+							a.statusMessage = "Please wait..."
+							return true
+						}
+						a.transitionMutex.Unlock()
+						
 						log.Printf("User pressed 'l' - Episode: %s, Position: %v", episode.Title, episode.Position)
 						// Add to queue
 						go a.addToQueue(episode)
@@ -380,6 +394,15 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 					}
 				} else if a.currentView == a.queue {
 					if episode := a.queue.GetSelected(); episode != nil {
+						// Check if transition is in progress
+						a.transitionMutex.Lock()
+						if a.transitionInProgress {
+							a.transitionMutex.Unlock()
+							a.statusMessage = "Please wait..."
+							return true
+						}
+						a.transitionMutex.Unlock()
+						
 						// Check if an episode is already playing or paused
 						if a.player.GetState() != player.StateStopped {
 							// Episode is playing or paused, do nothing
@@ -720,6 +743,15 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				}
 			} else if a.currentView == a.episodes {
 				if episode := a.episodes.GetSelected(); episode != nil {
+					// Check if transition is in progress
+					a.transitionMutex.Lock()
+					if a.transitionInProgress {
+						a.transitionMutex.Unlock()
+						a.statusMessage = "Please wait..."
+						return true
+					}
+					a.transitionMutex.Unlock()
+					
 					log.Printf("User pressed Enter - Episode: %s, Position: %v", episode.Title, episode.Position)
 					// Add to queue
 					go a.addToQueue(episode)
@@ -727,6 +759,15 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				}
 			} else if a.currentView == a.queue {
 				if episode := a.queue.GetSelected(); episode != nil {
+					// Check if transition is in progress
+					a.transitionMutex.Lock()
+					if a.transitionInProgress {
+						a.transitionMutex.Unlock()
+						a.statusMessage = "Please wait..."
+						return true
+					}
+					a.transitionMutex.Unlock()
+					
 					// Check if an episode is already playing or paused
 					if a.player.GetState() != player.StateStopped {
 						// Episode is playing or paused, do nothing
@@ -989,7 +1030,6 @@ func (a *App) draw() {
 func (a *App) handleProgress() {
 	saveCounter := 0
 	var lastEpisodeID string
-	completionTriggered := false
 	var lastPlayerState player.PlayerState = player.StateStopped
 
 	for progress := range a.player.Progress() {
@@ -1004,65 +1044,39 @@ func (a *App) handleProgress() {
 		// Get current player state
 		currentPlayerState := a.player.GetState()
 
-		// Reset completion trigger when episode changes
+		// Reset completion flag when episode changes
 		if a.currentEpisode != nil && a.currentEpisode.ID != lastEpisodeID {
 			lastEpisodeID = a.currentEpisode.ID
-			completionTriggered = false
+			a.completionHandled.Store(false)
 			lastPlayerState = currentPlayerState
 		}
 
 		// Check if player just stopped (state changed from playing/paused to stopped)
-		if !completionTriggered && a.currentEpisode != nil && 
+		if a.currentEpisode != nil && 
 			(lastPlayerState == player.StatePlaying || lastPlayerState == player.StatePaused) &&
 			currentPlayerState == player.StateStopped {
 			// Player just stopped - check if we're at the end
 			if progress.Duration > 0 && progress.Position >= progress.Duration {
-				log.Printf("Episode completion detected via state change! Position: %v, Duration: %v",
-					progress.Position, progress.Duration)
-				
-				// Check if there's a next episode in queue
-				if nextEpisode := a.subscriptions.GetNextInQueue(); nextEpisode != nil {
-					log.Printf("Next episode in queue: %s", nextEpisode.Title)
-					completionTriggered = true
-					// Run playNextInQueue directly to ensure proper state transition
-					a.playNextInQueue()
-				} else {
-					// No more episodes in queue
-					log.Printf("Episode ended, no more episodes in queue")
-					completionTriggered = true
+				// Try to set the completion flag atomically
+				if a.completionHandled.CompareAndSwap(false, true) {
+					log.Printf("Episode completion detected via state change! Position: %v, Duration: %v",
+						progress.Position, progress.Duration)
+					
+					// Handle completion in a goroutine to avoid blocking progress updates
+					go a.handleEpisodeCompletion()
 				}
 			}
 		}
 		lastPlayerState = currentPlayerState
 
-		// Check for episode completion (position >= duration, meaning episode has ended)
-		if !completionTriggered && progress.Duration > 0 {
-			// Log progress for debugging
+		// Log progress for debugging when near the end
+		if progress.Duration > 0 {
 			percentComplete := float64(progress.Position) / float64(progress.Duration) * 100
 			timeRemaining := progress.Duration - progress.Position
-
 			// Log every 10 seconds when near the end
 			if timeRemaining < 30*time.Second && saveCounter%10 == 0 {
 				log.Printf("Episode progress: %.1f%% complete, %v remaining (pos: %v, dur: %v)",
 					percentComplete, timeRemaining, progress.Position, progress.Duration)
-			}
-
-			if progress.Position >= progress.Duration {
-				// Episode has ended
-				log.Printf("Episode completion detected! Position: %v, Duration: %v",
-					progress.Position, progress.Duration)
-
-				// Check if there's a next episode in queue
-				if nextEpisode := a.subscriptions.GetNextInQueue(); nextEpisode != nil {
-					log.Printf("Next episode in queue: %s", nextEpisode.Title)
-					completionTriggered = true
-					// Run playNextInQueue directly to ensure proper state transition
-					a.playNextInQueue()
-				} else {
-					// No more episodes in queue
-					log.Printf("Episode ended, no more episodes in queue")
-					completionTriggered = true
-				}
 			}
 		}
 
@@ -1961,35 +1975,84 @@ func (a *App) addToQueue(episode *models.Episode) {
 	a.draw()
 }
 
+// handleEpisodeCompletion handles the completion of an episode and advances the queue
+func (a *App) handleEpisodeCompletion() {
+	a.transitionMutex.Lock()
+	defer a.transitionMutex.Unlock()
+	
+	// Double-check we still have a current episode and haven't already transitioned
+	if a.currentEpisode == nil || a.transitionInProgress {
+		return
+	}
+	
+	// Set transition flag
+	a.transitionInProgress = true
+	defer func() {
+		a.transitionInProgress = false
+	}()
+	
+	// Check if there's a next episode in queue
+	nextEpisode := a.subscriptions.GetNextInQueue()
+	if nextEpisode != nil {
+		log.Printf("Next episode in queue: %s", nextEpisode.Title)
+		a.playNextInQueue()
+	} else {
+		// No more episodes in queue
+		log.Printf("Episode ended, no more episodes in queue")
+		a.stopCurrentEpisode()
+	}
+}
+
 // playNextInQueue plays the next episode in the queue
 func (a *App) playNextInQueue() {
 	// Stop position ticker before transitioning to prevent race conditions
 	a.stopPositionTicker()
 	
-	// Remove current episode from queue
+	// Save current episode position before removing from queue
 	if a.currentEpisode != nil {
+		a.saveEpisodePosition()
+	}
+	
+	// Atomically remove current episode from queue and get next
+	var nextEpisode *models.Episode
+	if a.currentEpisode != nil {
+		// Remove current episode from queue
 		a.subscriptions.RemoveFromQueue(a.currentEpisode.ID)
-
+		
+		// Get next episode before saving to ensure atomicity
+		nextEpisode = a.subscriptions.GetNextInQueue()
+		
 		// Save subscriptions to persist queue changes
 		if err := a.subscriptions.Save(); err != nil {
 			log.Printf("Failed to save queue after removing episode: %v", err)
 		}
-
-		// Update queue view if visible
-		if a.currentView == a.queue {
-			a.queue.refresh()
-		}
-
-		// Update episode list to remove queue indicators
-		if a.currentView == a.episodes {
-			a.episodes.updateTableRows()
-		}
+		
+		// Update UI only after queue operations are complete
+		// Use goroutines to avoid blocking the transition
+		go func() {
+			// Update queue view if visible
+			if a.currentView == a.queue {
+				a.queue.refresh()
+			}
+			// Update episode list to remove queue indicators
+			if a.currentView == a.episodes {
+				a.episodes.updateTableRows()
+			}
+			// Trigger UI redraw
+			a.draw()
+		}()
+	} else {
+		// No current episode, just get next
+		nextEpisode = a.subscriptions.GetNextInQueue()
 	}
 
-	// Get next episode
-	nextEpisode := a.subscriptions.GetNextInQueue()
 	if nextEpisode == nil {
 		a.statusMessage = "Queue finished"
+		// Clear current episode state
+		a.currentEpisode = nil
+		a.currentPodcast = nil
+		a.episodes.SetCurrentEpisode(nil)
+		a.queue.SetCurrentEpisode(nil)
 		a.draw()
 		return
 	}
@@ -1997,8 +2060,7 @@ func (a *App) playNextInQueue() {
 	// Play next episode
 	log.Printf("Auto-advancing to next episode in queue: %s", nextEpisode.Title)
 	a.statusMessage = fmt.Sprintf("Playing next: %s", nextEpisode.Title)
-	a.draw()
-
+	
 	// Play the next episode
 	a.playEpisode(nextEpisode)
 }

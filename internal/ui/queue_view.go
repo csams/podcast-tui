@@ -429,6 +429,31 @@ func (r *QueueTableRow) GetCell(columnIndex int) string {
 }
 
 func (r *QueueTableRow) GetCellStyle(columnIndex int, selected bool) *tcell.Style {
+	// Style the status column if episode is downloaded
+	if columnIndex == 0 && r.downloadManager != nil {
+		podcastTitle := ""
+		if r.podcast != nil {
+			podcastTitle = r.podcast.Title
+		}
+		if r.downloadManager.IsEpisodeDownloaded(r.episode, podcastTitle) {
+			style := tcell.StyleDefault.Foreground(tcell.ColorGreen)
+			if selected {
+				style = style.Background(ColorSelection)
+			}
+			// Check if this is the currently playing/paused episode
+			if r.currentEpisode != nil && r.episode.ID == r.currentEpisode.ID && r.player != nil {
+				if !selected {
+					if r.player.GetState() == player.StatePlaying {
+						style = style.Background(ColorBlue7)
+					} else if r.player.GetState() == player.StatePaused {
+						style = style.Background(ColorBlue7)
+					}
+				}
+			}
+			return &style
+		}
+	}
+	
 	// Check if this is the currently playing/paused episode
 	if r.currentEpisode != nil && r.episode.ID == r.currentEpisode.ID && r.player != nil {
 		if !selected {

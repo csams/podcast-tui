@@ -21,13 +21,18 @@ func (r *PodcastTableRow) GetCell(columnIndex int) string {
 	switch columnIndex {
 	case 0: // Status column (selection indicator handled by table)
 		return ""
-	case 1: // Title
+	case 1: // Caught up indicator
+		if r.isCaughtUp() {
+			return "✔"
+		}
+		return ""
+	case 2: // Title
 		return r.podcast.Title
-	case 2: // URL
+	case 3: // URL
 		return r.podcast.URL
-	case 3: // Latest episode date
+	case 4: // Latest episode date
 		return r.getLatestEpisodeDate()
-	case 4: // Episode count
+	case 5: // Episode count
 		return fmt.Sprintf("%d eps", len(r.podcast.Episodes))
 	default:
 		return ""
@@ -35,7 +40,14 @@ func (r *PodcastTableRow) GetCell(columnIndex int) string {
 }
 
 func (r *PodcastTableRow) GetCellStyle(columnIndex int, selected bool) *tcell.Style {
-	// No custom cell styles needed for podcasts
+	if columnIndex == 1 && r.isCaughtUp() {
+		// Style the checkmark in green
+		style := tcell.StyleDefault.Foreground(tcell.ColorGreen)
+		if selected {
+			style = style.Background(ColorSelection)
+		}
+		return &style
+	}
 	return nil
 }
 
@@ -45,7 +57,7 @@ func (r *PodcastTableRow) GetHighlightPositions(columnIndex int) []int {
 	}
 	
 	switch columnIndex {
-	case 1: // Title
+	case 2: // Title
 		if r.matchResult.MatchField == "title" {
 			return r.matchResult.Positions
 		}
@@ -77,6 +89,42 @@ func (r *PodcastTableRow) getLatestEpisodeDate() string {
 	return localDate.Format("2006-01-02")
 }
 
+func (r *PodcastTableRow) getLatestEpisode() *models.Episode {
+	if len(r.podcast.Episodes) == 0 {
+		return nil
+	}
+
+	var latestEpisode *models.Episode
+	var latestDate time.Time
+	
+	for _, episode := range r.podcast.Episodes {
+		if episode.PublishDate.After(latestDate) {
+			latestDate = episode.PublishDate
+			latestEpisode = episode
+		}
+	}
+	
+	return latestEpisode
+}
+
+func (r *PodcastTableRow) isCaughtUp() bool {
+	latest := r.getLatestEpisode()
+	if latest == nil || latest.Duration == 0 {
+		return false
+	}
+	
+	remainingTime := latest.Duration - latest.Position
+	threshold98Percent := time.Duration(float64(latest.Duration) * 0.02)
+	threshold2Minutes := 2 * time.Minute
+	
+	// Use the smaller of the two thresholds
+	if threshold98Percent < threshold2Minutes {
+		return remainingTime <= threshold98Percent
+	} else {
+		return remainingTime <= threshold2Minutes
+	}
+}
+
 // PodcastListView is the podcast list using the table abstraction
 type PodcastListView struct {
 	table            *Table
@@ -98,6 +146,7 @@ func NewPodcastListView() *PodcastListView {
 	// Configure table columns
 	v.table.SetColumns([]TableColumn{
 		{Title: "", Width: 2, Align: AlignLeft},                    // Status
+		{Title: "Caught Up", Width: 10, Align: AlignCenter},        // Caught up indicator
 		{Title: "Title", MinWidth: 20, FlexWeight: 0.6, Align: AlignLeft},   // Title
 		{Title: "Feed URL", MinWidth: 20, FlexWeight: 0.4, Align: AlignLeft}, // URL
 		{Title: "Latest", Width: 10, Align: AlignLeft},            // Latest date

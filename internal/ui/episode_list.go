@@ -40,6 +40,25 @@ func (r *EpisodeTableRow) GetCell(columnIndex int) string {
 }
 
 func (r *EpisodeTableRow) GetCellStyle(columnIndex int, selected bool) *tcell.Style {
+	// Style the download indicator column
+	if columnIndex == 0 && r.downloadManager != nil && r.downloadManager.IsEpisodeDownloaded(r.episode, r.podcastTitle) {
+		style := tcell.StyleDefault.Foreground(tcell.ColorGreen)
+		if selected {
+			style = style.Background(ColorSelection)
+		}
+		// Check if this is the currently playing/paused episode
+		if r.currentEpisode != nil && r.episode.ID == r.currentEpisode.ID && r.player != nil {
+			if !selected {
+				if r.player.GetState() == player.StatePlaying {
+					style = style.Background(ColorBlue7)
+				} else if r.player.GetState() == player.StatePaused {
+					style = style.Background(ColorBlue7)
+				}
+			}
+		}
+		return &style
+	}
+	
 	// Check if this is the currently playing/paused episode
 	if r.currentEpisode != nil && r.episode.ID == r.currentEpisode.ID && r.player != nil {
 		if !selected {

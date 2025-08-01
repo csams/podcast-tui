@@ -23,6 +23,9 @@ A terminal-based podcast manager with vim-style keybindings, built with Go and t
 - Episode queue management with auto-advance playback
 - Queue view showing podcast titles and playback controls
 - Flexible navigation between podcast, episode, and queue views
+- Caught Up indicator showing when most recent episode is nearly complete
+- Single instance enforcement to prevent multiple app instances
+- Enhanced logging for feed parsing failures
 
 ## Requirements
 
@@ -52,6 +55,10 @@ A terminal-based podcast manager with vim-style keybindings, built with Go and t
 
 **Episode View Layout**: When viewing episodes, the screen is split with the episode list on top and a description window at the bottom showing details of the currently selected episode. The description window automatically converts markdown/HTML to readable terminal text.
 
+**Podcast List Indicators**:
+- `✔` - Caught Up (most recent episode is within 2 minutes of end or 98% complete)
+- Episode count shows total episodes available
+
 **Episode Status Indicators**:
 - `Q:1`, `Q:2` - Queue position
 - `▶` - Currently playing episode (highlighted with green text)
@@ -60,6 +67,7 @@ A terminal-based podcast manager with vim-style keybindings, built with Go and t
 - `[⬇50%]` - Downloading (with progress percentage)
 - `[⏸]` - Download queued
 - `[⚠]` - Download failed
+- `✎` - Episode has notes
 - Position format: `15:30/45:00` (current position/total duration)
 
 ### Playback Control
@@ -222,6 +230,14 @@ The application stores all configuration and data in the user's config directory
 
 Currently, the application does not support environment variable configuration. All settings are file-based in the configuration directory.
 
+### Application Lock
+
+The application uses a PID lock file to ensure only one instance can run at a time:
+- **Lock File**: `~/.config/podcast-tui/podcast-tui.lock`
+- **Content**: Process ID of the running instance
+- **Behavior**: If another instance is already running, the application will exit with an error message
+- **Stale Lock Cleanup**: Automatically cleans up locks from crashed instances
+
 ### Platform-Specific Paths
 
 The application uses Go's standard user directory functions:
@@ -247,3 +263,16 @@ podcast-tui/
 │   └── markdown/        # Markdown/HTML to terminal text conversion
 └── go.mod
 ```
+
+## Troubleshooting
+
+### Feed Parsing Issues
+If feeds fail to load or refresh:
+- Check the application logs for detailed error messages
+- Verify the feed URL is correct and accessible
+- Some servers may block the default user agent; the app uses a Firefox user agent string
+
+### Single Instance Lock
+If you get an error about another instance running:
+- Check if another instance is actually running: `ps aux | grep podcast-tui`
+- If no instance is running, remove the stale lock file: `rm ~/.config/podcast-tui/podcast-tui.lock`

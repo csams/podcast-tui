@@ -57,11 +57,16 @@ func LoadSubscriptions() (*Subscriptions, error) {
 	// Build the episode index
 	subs.buildIndex()
 	
+	// Clean up any invalid queue entries
+	queueCleaned := subs.CleanQueue()
+	
 	// Convert any missing descriptions
-	if subs.ConvertMissingDescriptions() {
-		// Save if we converted any descriptions
+	descriptionsConverted := subs.ConvertMissingDescriptions()
+	
+	// Save if we made any changes
+	if queueCleaned || descriptionsConverted {
 		if err := subs.Save(); err != nil {
-			// Log but don't fail - conversions will happen again next time
+			// Log but don't fail - cleanup will happen again next time
 			// This is not critical for app functionality
 		}
 	}
@@ -222,6 +227,9 @@ func (s *Subscriptions) AddToQueue(episodeID string) error {
 
 // RemoveFromQueue removes an episode from the queue
 func (s *Subscriptions) RemoveFromQueue(episodeID string) {
+	s.queueMutex.Lock()
+	defer s.queueMutex.Unlock()
+	
 	newQueue := make([]*QueueEntry, 0, len(s.Queue))
 	for _, entry := range s.Queue {
 		if entry.EpisodeID != episodeID {
@@ -277,6 +285,9 @@ func (s *Subscriptions) ReorderQueue(positions []int) {
 
 // MoveQueueItemUp moves an item up in the queue (towards position 1)
 func (s *Subscriptions) MoveQueueItemUp(index int) bool {
+	s.queueMutex.Lock()
+	defer s.queueMutex.Unlock()
+	
 	if index <= 0 || index >= len(s.Queue) {
 		return false
 	}
@@ -289,6 +300,9 @@ func (s *Subscriptions) MoveQueueItemUp(index int) bool {
 
 // MoveQueueItemDown moves an item down in the queue (towards the end)
 func (s *Subscriptions) MoveQueueItemDown(index int) bool {
+	s.queueMutex.Lock()
+	defer s.queueMutex.Unlock()
+	
 	if index < 0 || index >= len(s.Queue)-1 {
 		return false
 	}
@@ -318,6 +332,30 @@ func (s *Subscriptions) GetQueueEpisodes() []*Episode {
 		}
 	}
 	return episodes
+}
+
+// CleanQueue removes any queue entries that reference non-existent episodes
+func (s *Subscriptions) CleanQueue() bool {
+	s.queueMutex.Lock()
+	defer s.queueMutex.Unlock()
+	
+	newQueue := make([]*QueueEntry, 0, len(s.Queue))
+	cleaned := false
+	
+	for _, entry := range s.Queue {
+		if episode := s.GetEpisodeByID(entry.EpisodeID); episode != nil {
+			newQueue = append(newQueue, entry)
+		} else {
+			cleaned = true
+		}
+	}
+	
+	if cleaned {
+		s.Queue = newQueue
+		s.reindexQueue()
+	}
+	
+	return cleaned
 }
 
 // GetPodcastForEpisode returns the podcast that contains the given episode

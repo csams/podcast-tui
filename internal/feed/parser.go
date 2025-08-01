@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -51,20 +52,55 @@ type Enclosure struct {
 }
 
 func ParseFeed(url string) (*models.Podcast, error) {
-	resp, err := http.Get(url)
+	// Create custom HTTP client with Firefox user agent
+	client := &http.Client{
+		Timeout: 30 * time.Second,
+	}
+	
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch feed: %w", err)
+		log.Printf("Feed parser: Failed to create request for URL %s: %v", url, err)
+		return nil, fmt.Errorf("failed to create request for %s: %w", url, err)
+	}
+	
+	// Set Firefox user agent
+	req.Header.Set("User-Agent", "Mozilla/5.0 (X11; Linux i686; rv:141.0) Gecko/20100101 Firefox/141.0")
+	
+	log.Printf("Feed parser: Fetching feed from %s", url)
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("Feed parser: HTTP request failed for %s: %v", url, err)
+		return nil, fmt.Errorf("failed to fetch feed from %s: %w", url, err)
 	}
 	defer resp.Body.Close()
+	
+	// Log response details
+	log.Printf("Feed parser: Response for %s - Status: %s, Content-Type: %s, Content-Length: %s",
+		url, resp.Status, resp.Header.Get("Content-Type"), resp.Header.Get("Content-Length"))
+	
+	// Check for non-200 status codes
+	if resp.StatusCode != http.StatusOK {
+		log.Printf("Feed parser: Non-OK status code %d for %s", resp.StatusCode, url)
+		return nil, fmt.Errorf("server returned status %d for %s", resp.StatusCode, url)
+	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %w", err)
+		log.Printf("Feed parser: Failed to read response body for %s: %v", url, err)
+		return nil, fmt.Errorf("failed to read response from %s: %w", url, err)
 	}
+	
+	log.Printf("Feed parser: Read %d bytes from %s", len(data), url)
 
 	var rss RSS
 	if err := xml.Unmarshal(data, &rss); err != nil {
-		return nil, fmt.Errorf("failed to parse RSS: %w", err)
+		// Log first 500 bytes of response for debugging
+		sample := string(data)
+		if len(sample) > 500 {
+			sample = sample[:500] + "..."
+		}
+		log.Printf("Feed parser: XML parsing failed for %s: %v\nFirst 500 bytes: %s", url, err, sample)
+		return nil, fmt.Errorf("failed to parse RSS from %s: %w", url, err)
 	}
 
 	// Try to get the best image URL
@@ -107,6 +143,9 @@ func ParseFeed(url string) (*models.Podcast, error) {
 
 		if pubDate, err := parseRFC2822Date(item.PubDate); err == nil {
 			episode.PublishDate = pubDate
+		} else if item.PubDate != "" {
+			log.Printf("Feed parser: Warning - Failed to parse date '%s' for episode '%s' in feed %s: %v",
+				item.PubDate, item.Title, url, err)
 		}
 
 		// Generate unique ID for the episode
@@ -121,6 +160,18 @@ func ParseFeed(url string) (*models.Podcast, error) {
 		podcast.Episodes = append(podcast.Episodes, episode)
 	}
 
+	// Log successful parsing
+	log.Printf("Feed parser: Successfully parsed feed from %s - Title: %s, Episodes: %d",
+		url, podcast.Title, len(podcast.Episodes))
+	
+	// Warn about potential issues
+	if podcast.Title == "" {
+		log.Printf("Feed parser: Warning - Empty title for feed %s", url)
+	}
+	if len(podcast.Episodes) == 0 {
+		log.Printf("Feed parser: Warning - No episodes found in feed %s", url)
+	}
+	
 	return podcast, nil
 }
 

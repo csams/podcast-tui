@@ -210,7 +210,7 @@ func NewEpisodeListView() *EpisodeListView {
 	
 	// Configure table columns
 	v.table.SetColumns([]TableColumn{
-		{Title: "Local", Width: 9, Align: AlignLeft},              // Status/Download
+		{Title: "Local", Width: 16, Align: AlignLeft},             // Status/Download
 		{Title: "Title", MinWidth: 20, FlexWeight: 1.0, Align: AlignLeft}, // Title
 		{Title: "Date", Width: 10, Align: AlignLeft},              // Date
 		{Title: "Position", Width: 17, Align: AlignLeft},          // Position

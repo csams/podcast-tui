@@ -41,7 +41,7 @@ func NewQueueView() *QueueView {
 
 	// Configure table columns with podcast title
 	columns := []TableColumn{
-		{Title: "Local", Width: 9, Align: AlignLeft},                        // Status/Download
+		{Title: "Local", Width: 16, Align: AlignLeft},                       // Status/Download
 		{Title: "Podcast", MinWidth: 15, FlexWeight: 0.4, Align: AlignLeft}, // Podcast title
 		{Title: "Episode", MinWidth: 20, FlexWeight: 0.6, Align: AlignLeft}, // Episode title
 		{Title: "Date", Width: 10, Align: AlignLeft},                        // Date

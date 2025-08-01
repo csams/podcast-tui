@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 	
 	"github.com/csams/podcast-tui/internal/markdown"
@@ -21,6 +22,9 @@ type Subscriptions struct {
 	// podcastIndex is a map from episode ID to podcast pointer for fast lookups
 	// This is not serialized to JSON and is rebuilt on load
 	podcastIndex map[string]*Podcast `json:"-"`
+	
+	// queueMutex protects queue operations from concurrent access
+	queueMutex sync.RWMutex `json:"-"`
 }
 
 func LoadSubscriptions() (*Subscriptions, error) {
@@ -190,6 +194,9 @@ func (s *Subscriptions) UpdateEpisodeIndex(episode *Episode, podcast *Podcast) {
 
 // AddToQueue adds an episode to the playback queue
 func (s *Subscriptions) AddToQueue(episodeID string) error {
+	s.queueMutex.Lock()
+	defer s.queueMutex.Unlock()
+	
 	// Check if episode exists
 	if s.GetEpisodeByID(episodeID) == nil {
 		return fmt.Errorf("episode not found: %s", episodeID)
@@ -227,6 +234,9 @@ func (s *Subscriptions) RemoveFromQueue(episodeID string) {
 
 // GetQueuePosition returns the position of an episode in the queue (0 if not in queue)
 func (s *Subscriptions) GetQueuePosition(episodeID string) int {
+	s.queueMutex.RLock()
+	defer s.queueMutex.RUnlock()
+	
 	for i, entry := range s.Queue {
 		if entry.EpisodeID == episodeID {
 			return i + 1
@@ -237,6 +247,9 @@ func (s *Subscriptions) GetQueuePosition(episodeID string) int {
 
 // GetNextInQueue returns the next episode in the queue
 func (s *Subscriptions) GetNextInQueue() *Episode {
+	s.queueMutex.RLock()
+	defer s.queueMutex.RUnlock()
+	
 	if len(s.Queue) > 0 {
 		return s.GetEpisodeByID(s.Queue[0].EpisodeID)
 	}
@@ -245,6 +258,9 @@ func (s *Subscriptions) GetNextInQueue() *Episode {
 
 // ReorderQueue reorders the queue based on new positions
 func (s *Subscriptions) ReorderQueue(positions []int) {
+	s.queueMutex.Lock()
+	defer s.queueMutex.Unlock()
+	
 	if len(positions) != len(s.Queue) {
 		return
 	}
@@ -292,6 +308,9 @@ func (s *Subscriptions) reindexQueue() {
 
 // GetQueueEpisodes returns all episodes in the queue in order
 func (s *Subscriptions) GetQueueEpisodes() []*Episode {
+	s.queueMutex.RLock()
+	defer s.queueMutex.RUnlock()
+	
 	episodes := make([]*Episode, 0, len(s.Queue))
 	for _, entry := range s.Queue {
 		if episode := s.GetEpisodeByID(entry.EpisodeID); episode != nil {

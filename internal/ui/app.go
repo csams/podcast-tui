@@ -305,28 +305,62 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 				case 'j':
 					// Move episode down in queue
 					selectedIdx := a.queue.GetSelectedIndex()
-					if a.subscriptions.MoveQueueItemDown(selectedIdx) {
+					// Get the episode being moved before the operation
+					selectedEpisode := a.queue.GetSelected()
+					if selectedEpisode != nil && a.subscriptions.MoveQueueItemDown(selectedIdx) {
 						if err := a.subscriptions.Save(); err != nil {
 							a.statusMessage = "Error saving queue: " + err.Error()
 						} else {
 							a.statusMessage = "Moved episode down"
 							a.queue.refresh()
-							// Keep selection on the moved item
-							a.queue.table.selectedIdx = selectedIdx + 1
+							// Find and select the moved episode by ID
+							found := false
+							for i, ep := range a.queue.episodes {
+								if ep.ID == selectedEpisode.ID {
+									a.queue.table.selectedIdx = i
+									a.queue.table.ensureVisible()
+									found = true
+									break
+								}
+							}
+							// If episode not found, ensure valid selection
+							if !found && len(a.queue.episodes) > 0 {
+								if a.queue.table.selectedIdx >= len(a.queue.episodes) {
+									a.queue.table.selectedIdx = len(a.queue.episodes) - 1
+								}
+								a.queue.table.ensureVisible()
+							}
 						}
 					}
 					return true
 				case 'k':
 					// Move episode up in queue
 					selectedIdx := a.queue.GetSelectedIndex()
-					if a.subscriptions.MoveQueueItemUp(selectedIdx) {
+					// Get the episode being moved before the operation
+					selectedEpisode := a.queue.GetSelected()
+					if selectedEpisode != nil && a.subscriptions.MoveQueueItemUp(selectedIdx) {
 						if err := a.subscriptions.Save(); err != nil {
 							a.statusMessage = "Error saving queue: " + err.Error()
 						} else {
 							a.statusMessage = "Moved episode up"
 							a.queue.refresh()
-							// Keep selection on the moved item
-							a.queue.table.selectedIdx = selectedIdx - 1
+							// Find and select the moved episode by ID
+							found := false
+							for i, ep := range a.queue.episodes {
+								if ep.ID == selectedEpisode.ID {
+									a.queue.table.selectedIdx = i
+									a.queue.table.ensureVisible()
+									found = true
+									break
+								}
+							}
+							// If episode not found, ensure valid selection
+							if !found && len(a.queue.episodes) > 0 {
+								if a.queue.table.selectedIdx >= len(a.queue.episodes) {
+									a.queue.table.selectedIdx = len(a.queue.episodes) - 1
+								}
+								a.queue.table.ensureVisible()
+							}
 						}
 					}
 					return true
@@ -389,7 +423,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 						
 						log.Printf("User pressed 'l' - Episode: %s, Position: %v", episode.Title, episode.Position)
 						// Add to queue
-						go a.addToQueue(episode)
+						a.addToQueue(episode)
 						return true
 					}
 				} else if a.currentView == a.queue {
@@ -754,7 +788,7 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 					
 					log.Printf("User pressed Enter - Episode: %s, Position: %v", episode.Title, episode.Position)
 					// Add to queue
-					go a.addToQueue(episode)
+					a.addToQueue(episode)
 					return true
 				}
 			} else if a.currentView == a.queue {
@@ -1313,7 +1347,7 @@ func (a *App) addPodcast(url string) {
 	podcast, err := feed.ParseFeed(url)
 	if err != nil {
 		a.statusMessage = "Error: " + err.Error()
-		log.Printf("Failed to add podcast: %v", err)
+		log.Printf("Failed to add podcast from %s: %v", url, err)
 		a.draw() // Show error
 		return
 	}
@@ -1351,6 +1385,7 @@ func (a *App) refreshFeeds() {
 	// Create wait group for concurrent refreshes
 	var wg sync.WaitGroup
 	successCount := int32(0)
+	failedCount := int32(0)
 	processedCount := int32(0)
 	
 	startTime := time.Now()
@@ -1390,7 +1425,8 @@ func (a *App) refreshFeeds() {
 			// Parse the feed
 			updated, err := feed.ParseFeed(p.URL)
 			if err != nil {
-				log.Printf("Failed to refresh %s: %v", p.Title, err)
+				log.Printf("Failed to refresh podcast '%s' from %s: %v", p.Title, p.URL, err)
+				atomic.AddInt32(&failedCount, 1)
 				return
 			}
 			
@@ -1402,6 +1438,12 @@ func (a *App) refreshFeeds() {
 	
 	// Wait for all refreshes to complete
 	wg.Wait()
+	
+	// Log refresh summary
+	failed := atomic.LoadInt32(&failedCount)
+	success := atomic.LoadInt32(&successCount)
+	log.Printf("Feed refresh completed: %d successful, %d failed out of %d total", 
+		success, failed, totalPodcasts)
 	
 	// Save subscriptions
 	if err := a.subscriptions.Save(); err != nil {
@@ -1454,7 +1496,7 @@ func (a *App) refreshSinglePodcast(podcast *models.Podcast) {
 	// Parse the feed
 	updated, err := feed.ParseFeed(podcast.URL)
 	if err != nil {
-		log.Printf("Failed to refresh %s: %v", podcast.Title, err)
+		log.Printf("Failed to refresh single podcast '%s' from %s: %v", podcast.Title, podcast.URL, err)
 		a.statusMessage = fmt.Sprintf("Failed to refresh %s: %v", podcast.Title, err)
 		a.draw()
 		return
@@ -2028,19 +2070,16 @@ func (a *App) playNextInQueue() {
 		}
 		
 		// Update UI only after queue operations are complete
-		// Use goroutines to avoid blocking the transition
-		go func() {
-			// Update queue view if visible
-			if a.currentView == a.queue {
-				a.queue.refresh()
-			}
-			// Update episode list to remove queue indicators
-			if a.currentView == a.episodes {
-				a.episodes.updateTableRows()
-			}
-			// Trigger UI redraw
-			a.draw()
-		}()
+		// Update queue view if visible
+		if a.currentView == a.queue {
+			a.queue.refresh()
+		}
+		// Update episode list to remove queue indicators
+		if a.currentView == a.episodes {
+			a.episodes.updateTableRows()
+		}
+		// Trigger UI redraw
+		a.draw()
 	} else {
 		// No current episode, just get next
 		nextEpisode = a.subscriptions.GetNextInQueue()
@@ -2071,11 +2110,46 @@ func (a *App) removeFromQueue(episode *models.Episode) {
 		return
 	}
 
+	// Use transition mutex to prevent concurrent transitions
+	a.transitionMutex.Lock()
+	defer a.transitionMutex.Unlock()
+
+	// Check if a transition is already in progress
+	if a.transitionInProgress {
+		log.Printf("removeFromQueue: Transition already in progress, skipping")
+		a.statusMessage = "Please wait for current transition to complete"
+		a.draw()
+		return
+	}
+
 	// Check if we're removing the currently playing episode
 	isCurrentlyPlaying := a.currentEpisode != nil && a.currentEpisode.ID == episode.ID
 
+	// If removing current episode, set transition flag
+	if isCurrentlyPlaying {
+		a.transitionInProgress = true
+		defer func() {
+			a.transitionInProgress = false
+		}()
+		
+		// Reset completion flag to prevent automatic completion handling
+		a.completionHandled.Store(false)
+		
+		// Stop position ticker before transition
+		a.stopPositionTicker()
+		
+		// Save current episode position
+		a.saveEpisodePosition()
+	}
+
 	// Remove from queue
 	a.subscriptions.RemoveFromQueue(episode.ID)
+
+	// Get next episode before saving (for atomicity)
+	var nextEpisode *models.Episode
+	if isCurrentlyPlaying {
+		nextEpisode = a.subscriptions.GetNextInQueue()
+	}
 
 	// Save subscriptions
 	if err := a.subscriptions.Save(); err != nil {
@@ -2092,22 +2166,27 @@ func (a *App) removeFromQueue(episode *models.Episode) {
 
 	// Handle playback if we removed the currently playing episode
 	if isCurrentlyPlaying {
-		// Get next episode in queue
-		nextEpisode := a.subscriptions.GetNextInQueue()
 		if nextEpisode != nil {
-			// Play next episode
+			// Play next episode synchronously to ensure proper state transition
+			log.Printf("removeFromQueue: Starting next episode: %s", nextEpisode.Title)
 			a.statusMessage = fmt.Sprintf("Playing next: %s", nextEpisode.Title)
-			go a.playEpisode(nextEpisode)
+			a.draw()
+			
+			// Play synchronously within the mutex lock
+			a.playEpisode(nextEpisode)
 		} else {
 			// No more episodes in queue, stop playback
+			log.Printf("removeFromQueue: Queue empty, stopping playback")
 			a.statusMessage = "Queue empty, stopping playback"
-			go a.stopCurrentEpisode()
+			a.draw()
+			
+			// Stop synchronously
+			a.stopCurrentEpisode()
 		}
 	} else {
 		a.statusMessage = "Removed from queue"
+		a.draw()
 	}
-
-	a.draw()
 }
 
 // handleDownloadProgress handles download progress updates

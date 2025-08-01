@@ -129,8 +129,11 @@ func (p *Player) StartIdle() error {
 func (p *Player) SwitchTrack(url string) error {
 	p.mu.Lock()
 	
+	log.Printf("Player: SwitchTrack called - current state: %v, cmd: %v, url: %s", p.state, p.cmd != nil, url)
+	
 	if p.state == StateStopped || p.cmd == nil {
 		// No player running, use regular Play
+		log.Printf("Player: No active player, using regular Play")
 		p.mu.Unlock()
 		return p.Play(url)
 	}
@@ -148,12 +151,14 @@ func (p *Player) SwitchTrack(url string) error {
 	resp, err := p.sendCommand(loadCmd)
 	if err != nil {
 		// If command fails, fallback to regular play
+		log.Printf("Player: loadfile command failed: %v, falling back to Play", err)
 		p.mu.Unlock()
 		return p.Play(url)
 	}
 	
 	// Check if loadfile succeeded
 	if resp != nil && resp.Error != "success" && resp.Error != "" {
+		log.Printf("Player: loadfile returned error: %s, falling back to Play", resp.Error)
 		p.mu.Unlock()
 		return p.Play(url)
 	}
@@ -168,6 +173,14 @@ func (p *Player) SwitchTrack(url string) error {
 	
 	// Reset state to playing (not paused)
 	p.state = StatePlaying
+	
+	// Reset watch once to allow new progress watcher
+	p.watchOnce = sync.Once{}
+	
+	// Start progress watcher for new track
+	go p.watchProgress()
+	
+	log.Printf("Player: SwitchTrack completed successfully, state: %v", p.state)
 	p.mu.Unlock()
 	return nil
 }

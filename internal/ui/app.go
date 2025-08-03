@@ -746,6 +746,10 @@ func (a *App) handleKey(ev *tcell.EventKey) bool {
 					}
 				}
 			case '/':
+				// Search is disabled in queue view
+				if a.currentView == a.queue {
+					return false
+				}
 				a.mode = ModeSearch
 				// Preserve existing search query when re-entering search mode
 				if a.currentView == a.episodes {
@@ -2145,12 +2149,6 @@ func (a *App) removeFromQueue(episode *models.Episode) {
 	// Remove from queue
 	a.subscriptions.RemoveFromQueue(episode.ID)
 
-	// Get next episode before saving (for atomicity)
-	var nextEpisode *models.Episode
-	if isCurrentlyPlaying {
-		nextEpisode = a.subscriptions.GetNextInQueue()
-	}
-
 	// Save subscriptions
 	if err := a.subscriptions.Save(); err != nil {
 		log.Printf("Failed to save queue after removing episode: %v", err)
@@ -2166,23 +2164,13 @@ func (a *App) removeFromQueue(episode *models.Episode) {
 
 	// Handle playback if we removed the currently playing episode
 	if isCurrentlyPlaying {
-		if nextEpisode != nil {
-			// Play next episode synchronously to ensure proper state transition
-			log.Printf("removeFromQueue: Starting next episode: %s", nextEpisode.Title)
-			a.statusMessage = fmt.Sprintf("Playing next: %s", nextEpisode.Title)
-			a.draw()
-			
-			// Play synchronously within the mutex lock
-			a.playEpisode(nextEpisode)
-		} else {
-			// No more episodes in queue, stop playback
-			log.Printf("removeFromQueue: Queue empty, stopping playback")
-			a.statusMessage = "Queue empty, stopping playback"
-			a.draw()
-			
-			// Stop synchronously
-			a.stopCurrentEpisode()
-		}
+		// Stop playback when manually removing the playing/paused episode
+		log.Printf("removeFromQueue: Stopping playback of removed episode")
+		a.statusMessage = "Stopped playback"
+		a.draw()
+		
+		// Stop synchronously
+		a.stopCurrentEpisode()
 	} else {
 		a.statusMessage = "Removed from queue"
 		a.draw()

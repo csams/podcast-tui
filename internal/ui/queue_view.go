@@ -2,7 +2,6 @@ package ui
 
 import (
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/csams/podcast-tui/internal/download"
@@ -18,10 +17,6 @@ type QueueView struct {
 	downloadManager *download.Manager
 	player          *player.Player
 	currentEpisode  *models.Episode
-	searchQuery     string
-	searchActive    bool
-	searchMatches   []int
-	currentMatch    int
 }
 
 type QueueTableRow struct {
@@ -30,7 +25,6 @@ type QueueTableRow struct {
 	queuePosition   int
 	currentEpisode  *models.Episode
 	player          *player.Player
-	searchMatches   []int
 	downloadManager *download.Manager
 }
 
@@ -93,11 +87,6 @@ func (v *QueueView) refresh() {
 			downloadManager: v.downloadManager,
 		}
 
-		// Apply search matches if active
-		if v.searchActive && v.searchQuery != "" {
-			row.searchMatches = v.findSearchMatches(episode.Title, v.searchQuery)
-		}
-
 		rows[i] = row
 	}
 
@@ -138,51 +127,9 @@ func (v *QueueView) Draw(s tcell.Screen) {
 	v.table.SetPosition(0, 2)
 	v.table.SetSize(width, height-3) // Leave room for header and status bar
 	v.table.Draw(s)
-
-	// Show search info if active
-	if v.searchActive && len(v.searchMatches) > 0 {
-		v.drawSearchInfo(s)
-	}
-}
-
-func (v *QueueView) drawSearchInfo(s tcell.Screen) {
-	width, _ := s.Size()
-	info := fmt.Sprintf(" Match %d of %d ", v.currentMatch+1, len(v.searchMatches))
-	x := width - len(info) - 2
-	y := 3 // Below header and separator line
-
-	style := tcell.StyleDefault.Background(ColorBgHighlight).Foreground(ColorBright)
-	for i, r := range info {
-		s.SetContent(x+i, y, r, nil, style)
-	}
 }
 
 func (v *QueueView) HandleKey(ev *tcell.EventKey) bool {
-	if v.searchActive {
-		switch ev.Key() {
-		case tcell.KeyEscape:
-			v.clearSearch()
-			return true
-		case tcell.KeyEnter:
-			if len(v.searchMatches) > 0 {
-				v.table.selectedIdx = v.searchMatches[v.currentMatch]
-				v.table.ensureVisible()
-			}
-			v.clearSearch()
-			return true
-		case tcell.KeyRune:
-			switch ev.Rune() {
-			case 'n':
-				v.nextMatch()
-				return true
-			case 'N':
-				v.prevMatch()
-				return true
-			}
-		}
-		return false
-	}
-
 	// Normal mode key handling
 	switch ev.Key() {
 	case tcell.KeyRune:
@@ -211,10 +158,6 @@ func (v *QueueView) HandleKey(ev *tcell.EventKey) bool {
 			return true
 		case 'u':
 			// Remove selected episode from queue - handled by app
-			return true
-		case '/':
-			v.searchActive = true
-			v.searchQuery = ""
 			return true
 		}
 	case tcell.KeyCtrlD:
@@ -270,81 +213,6 @@ func (v *QueueView) UpdateCurrentEpisodePosition(s tcell.Screen) {
 			}
 		}
 	}
-}
-
-func (v *QueueView) StartSearch(query string) {
-	v.searchQuery = query
-	v.searchActive = true
-	v.searchMatches = []int{}
-	v.currentMatch = 0
-
-	// Find all matches
-	for i, episode := range v.episodes {
-		if v.findSearchMatches(episode.Title, query) != nil {
-			v.searchMatches = append(v.searchMatches, i)
-		}
-	}
-
-	// Jump to first match
-	if len(v.searchMatches) > 0 {
-		v.table.selectedIdx = v.searchMatches[0]
-		v.table.ensureVisible()
-	}
-
-	v.refresh()
-}
-
-func (v *QueueView) clearSearch() {
-	v.searchActive = false
-	v.searchQuery = ""
-	v.searchMatches = []int{}
-	v.currentMatch = 0
-	v.refresh()
-}
-
-func (v *QueueView) nextMatch() {
-	if len(v.searchMatches) == 0 {
-		return
-	}
-	v.currentMatch = (v.currentMatch + 1) % len(v.searchMatches)
-	v.table.selectedIdx = v.searchMatches[v.currentMatch]
-	v.table.ensureVisible()
-}
-
-func (v *QueueView) prevMatch() {
-	if len(v.searchMatches) == 0 {
-		return
-	}
-	v.currentMatch--
-	if v.currentMatch < 0 {
-		v.currentMatch = len(v.searchMatches) - 1
-	}
-	v.table.selectedIdx = v.searchMatches[v.currentMatch]
-	v.table.ensureVisible()
-}
-
-func (v *QueueView) findSearchMatches(text, query string) []int {
-	if query == "" {
-		return nil
-	}
-
-	lowerText := strings.ToLower(text)
-	lowerQuery := strings.ToLower(query)
-
-	var matches []int
-	start := 0
-	for {
-		idx := strings.Index(lowerText[start:], lowerQuery)
-		if idx == -1 {
-			break
-		}
-		for i := 0; i < len(query); i++ {
-			matches = append(matches, start+idx+i)
-		}
-		start += idx + 1
-	}
-
-	return matches
 }
 
 // QueueTableRow implementation
@@ -470,9 +338,7 @@ func (r *QueueTableRow) GetCellStyle(columnIndex int, selected bool) *tcell.Styl
 }
 
 func (r *QueueTableRow) GetHighlightPositions(columnIndex int) []int {
-	if columnIndex == 2 { // Episode Title column
-		return r.searchMatches
-	}
+	// Search is disabled in queue view
 	return nil
 }
 
